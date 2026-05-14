@@ -105,21 +105,33 @@ class _PageView extends StatelessWidget {
   }
 
   List<Annotation> _marksForParagraphInPage(int idx) {
-    // We do NOT have the absolute paragraph index here — we only show
-    // pertinent visual hints. The on-tap callback computes the absolute
-    // index by re-walking pages on the parent state.
-    return annotations
-        .forSegment(segmentId)
-        .where((a) =>
-            page.paragraphs.length > idx &&
-            (a.quote.startsWith(page.paragraphs[idx].substring(
-                    0,
-                    page.paragraphs[idx].length > 40
-                        ? 40
-                        : page.paragraphs[idx].length)) ||
-                page.paragraphs[idx].startsWith(a.quote.substring(
-                    0, a.quote.length > 40 ? 40 : a.quote.length))))
-        .toList();
+    // We don't have the absolute paragraph index here — the on-tap
+    // callback walks the parent state to recover it. So we fingerprint
+    // each annotation against the paragraph instead:
+    //   - Range highlight: the recorded `quoteStart..quoteEnd` substring
+    //     must exist verbatim at the same offsets in this paragraph.
+    //     Strong enough to identify the owning paragraph without the
+    //     absolute index.
+    //   - Whole-paragraph annotation: either side's first ≤40 chars
+    //     prefixes the other, since long paragraphs may be split across
+    //     pages and short ones may extend the stored quote.
+    if (idx >= page.paragraphs.length) return const [];
+    final paragraph = page.paragraphs[idx];
+    return annotations.forSegment(segmentId).where((a) {
+      if (a.isRange) {
+        final start = a.quoteStart!;
+        final end = a.quoteEnd!;
+        return start >= 0 &&
+            end <= paragraph.length &&
+            paragraph.substring(start, end) == a.quote;
+      }
+      final n = paragraph.length < 40 ? paragraph.length : 40;
+      if (n == 0) return false;
+      if (a.quote.startsWith(paragraph.substring(0, n))) return true;
+      final m = a.quote.length < 40 ? a.quote.length : 40;
+      if (m == 0) return false;
+      return paragraph.startsWith(a.quote.substring(0, m));
+    }).toList();
   }
 }
 
