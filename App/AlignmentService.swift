@@ -19,7 +19,9 @@ struct AlignmentService {
         }
 
         progress(.loadingModel(model: "parsing book"))
-        let importer = EPUBImporter()
+        guard let importer = EBookImporterRegistry.importer(for: ebookURL) else {
+            throw ImporterError.unsupportedFormat
+        }
         let imported = try await importer.importBook(from: ebookURL)
         let input = AlignmentInput(segments: imported.segments)
 

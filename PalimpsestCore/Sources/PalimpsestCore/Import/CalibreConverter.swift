@@ -4,11 +4,16 @@ public protocol PDFToEPUBConverter: Sendable {
     func convert(pdfURL: URL, outputDirectory: URL) async throws -> URL
 }
 
-/// Shells out to Calibre's bundled `ebook-convert` binary. Calibre is the gold
-/// standard for PDF → EPUB; bundling our own pure-Swift converter is out of scope.
+/// Shells out to Calibre's bundled `ebook-convert` binary.
+///
+/// **No longer wired into the app**: PDF goes through `PDFImporter` (PDFKit)
+/// and MOBI through the pure-Swift `MOBIImporter`. Both are App Sandbox-safe
+/// and App Store-eligible. This type is kept for the local-dev path on a
+/// developer-installed macOS where someone might still want to bulk-convert
+/// AZW3 / KF8 / DOCX files outside the app.
 ///
 /// Expects Calibre installed at `/Applications/calibre.app`. If absent, throws
-/// `ConverterError.calibreNotFound` so the UI can prompt the user to install.
+/// `ConverterError.calibreNotFound`.
 public struct CalibreConverter: PDFToEPUBConverter {
     public static let defaultBinaryPath = "/Applications/calibre.app/Contents/MacOS/ebook-convert"
     public let binaryPath: String

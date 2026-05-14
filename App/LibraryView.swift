@@ -228,7 +228,7 @@ struct LibraryView: View {
                 Button {
                     showingImporter = true
                 } label: {
-                    Label("Import .epub or .pdf", systemImage: "plus")
+                    Label("Import .epub, .mobi, or .pdf", systemImage: "plus")
                         .padding(.horizontal, 16)
                         .padding(.vertical, 8)
                 }
@@ -243,13 +243,16 @@ struct LibraryView: View {
     }
     #endif
 
-    /// Both platforms accept `.epub` only. PDF→EPUB conversion was
-    /// previously a macOS-only feature via Calibre's `ebook-convert`
-    /// subprocess, but App Sandbox (required for App Store distribution)
-    /// blocks subprocess spawning. Long-term replacement: PDFKit-based
-    /// extractor (cross-platform, sandbox-safe).
+    /// EPUB, MOBI/PRC/AZW, and PDF. EPUB and MOBI are parsed by pure-Swift
+    /// importers; PDF goes through PDFKit. All paths are App Sandbox-safe.
+    /// AZW3 / KF8 deliberately omitted — the in-tree MOBI parser throws on
+    /// KF8 payloads.
     private var importContentTypes: [UTType] {
-        [.epub]
+        var types: [UTType] = [.epub, .pdf]
+        if let mobi = UTType(filenameExtension: "mobi") { types.append(mobi) }
+        if let prc = UTType(filenameExtension: "prc") { types.append(prc) }
+        if let azw = UTType(filenameExtension: "azw") { types.append(azw) }
+        return types
     }
 
     private func handleImportPicker(_ result: Result<URL, Error>) {

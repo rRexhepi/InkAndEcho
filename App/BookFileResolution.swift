@@ -54,7 +54,7 @@ enum BookFileResolution {
     private static func rebaseToCurrentSandbox(_ stored: URL) -> URL? {
         let components = stored.pathComponents
         guard let palimpsestIdx = components.firstIndex(of: "Palimpsest") else { return nil }
-        let suffix = components[(palimpsestIdx + 1)...]  // Books, <UUID>, book.epub
+        let suffix = components[(palimpsestIdx + 1)...]  // Books, <UUID>, book.<ext>
         guard let appSupport = try? FileManager.default.url(
             for: .applicationSupportDirectory,
             in: .userDomainMask,

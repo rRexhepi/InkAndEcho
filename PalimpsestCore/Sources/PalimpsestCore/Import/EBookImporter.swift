@@ -438,7 +438,7 @@ private func extractChapterTitle(from xhtml: String) -> String? {
 
 // MARK: - HTML stripping
 
-private func stripHTML(_ html: String) -> String {
+func stripHTML(_ html: String) -> String {
     var text = html
 
     // Drop script/style blocks entirely.
@@ -495,15 +495,27 @@ private func stripHTML(_ html: String) -> String {
 
 public enum ImporterError: LocalizedError, Sendable {
     case malformedEPUB(String)
+    case malformedMOBI(String)
+    case malformedPDF(String)
     case unsupportedFormat
+    case unsupportedKF8
+    case drmProtected
     case missingMetadata(String)
 
     public var errorDescription: String? {
         switch self {
         case .malformedEPUB(let detail):
             return "Couldn't read this EPUB. \(detail)"
+        case .malformedMOBI(let detail):
+            return "Couldn't read this MOBI. \(detail)"
+        case .malformedPDF(let detail):
+            return "Couldn't read this PDF. \(detail)"
         case .unsupportedFormat:
             return "This file isn't a supported ebook format."
+        case .unsupportedKF8:
+            return "AZW3 / KF8 files aren't supported. Convert to EPUB first."
+        case .drmProtected:
+            return "This file is DRM-protected and can't be imported."
         case .missingMetadata(let detail):
             return "EPUB metadata is missing or unreadable. \(detail)"
         }

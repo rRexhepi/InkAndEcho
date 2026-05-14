@@ -7,36 +7,32 @@ import PalimpsestCore
 struct ImportService {
     let modelContext: ModelContext
 
-    /// Imports a book from a `.epub` URL. The resulting `Book` is persisted
-    /// with file URLs pointing into the app's Application Support directory.
+    /// Imports a book from a source URL. Supported formats route through
+    /// `EBookImporterRegistry`: EPUB and MOBI/PRC/AZW (pure Swift parsers),
+    /// PDF (PDFKit). The original file is copied into the app's Application
+    /// Support directory under `book.<canonical-ext>` and re-parsed on every
+    /// open, so adding a new format requires no schema changes.
     ///
-    /// PDF support was previously available on macOS via Calibre's
-    /// `ebook-convert` Process spawn. That path is dormant — App Sandbox
-    /// (required for App Store distribution) blocks subprocess execution
-    /// of arbitrary binaries. The `CalibreConverter` source is kept in
-    /// `PalimpsestCore` but no longer invoked.
+    /// Calibre's `ebook-convert` was the prior PDF / AZW3 path on macOS but
+    /// is dormant — App Sandbox blocks subprocess execution of arbitrary
+    /// binaries, and Calibre's GPLv3 license is incompatible with App Store
+    /// distribution. PDFKit replaces it for PDF; AZW3 / KF8 throw
+    /// `unsupportedKF8` and prompt the user to convert externally.
     func importBook(from sourceURL: URL) async throws -> Book {
         let ext = sourceURL.pathExtension.lowercased()
-        let epubURL: URL
-
-        switch ext {
-        case "epub":
-            epubURL = sourceURL
-        case "pdf":
-            throw ImportServiceError.pdfNotSupported
-        default:
+        guard let storedExt = EBookImporterRegistry.storedExtension(forSource: ext),
+              let importer = EBookImporterRegistry.importer(forExtension: ext) else {
             throw ImportServiceError.unsupportedFormat(ext)
         }
 
         // `.fileImporter` returns security-scoped URLs on iOS; reads
         // succeed only between start/stop calls. Without this, the
-        // ZIP open + copy below fail with EPERM and the picker appears
+        // open + copy below fail with EPERM and the picker appears
         // to silently no-op.
         let needsScope = sourceURL.startAccessingSecurityScopedResource()
         defer { if needsScope { sourceURL.stopAccessingSecurityScopedResource() } }
 
-        let importer = EPUBImporter()
-        let imported = try await importer.importBook(from: epubURL)
+        let imported = try await importer.importBook(from: sourceURL)
 
         let bookID = UUID()
         let bookDir = try appStorageURL()
@@ -44,15 +40,15 @@ struct ImportService {
             .appendingPathComponent(bookID.uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: bookDir, withIntermediateDirectories: true)
 
-        let storedEPUB = bookDir.appendingPathComponent("book.epub")
-        try FileManager.default.copyItem(at: epubURL, to: storedEPUB)
+        let storedURL = bookDir.appendingPathComponent("book.\(storedExt)")
+        try FileManager.default.copyItem(at: sourceURL, to: storedURL)
 
         let book = Book(
             id: bookID,
             title: imported.title,
             author: imported.author,
             coverImageData: imported.coverImageData,
-            ebookFileURL: storedEPUB,
+            ebookFileURL: storedURL,
             audiobookFileURL: nil,
             alignmentMapURL: nil,
             totalDurationSeconds: 0,
@@ -127,16 +123,13 @@ struct ImportService {
 enum ImportServiceError: LocalizedError {
     case unsupportedFormat(String)
     case missingEbook
-    case pdfNotSupported
 
     var errorDescription: String? {
         switch self {
         case .unsupportedFormat(let ext):
-            return "Unsupported file type: .\(ext). Use .epub."
+            return "Unsupported file type: .\(ext). Use .epub, .mobi, or .pdf."
         case .missingEbook:
             return "Book has no associated ebook file."
-        case .pdfNotSupported:
-            return "PDF import isn't supported in this build. Convert your PDF to .epub first."
         }
     }
 }

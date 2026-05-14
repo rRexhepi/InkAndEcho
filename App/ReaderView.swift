@@ -1844,7 +1844,10 @@ struct ReaderView: View {
             return
         }
         do {
-            let importer = EPUBImporter()
+            guard let importer = EBookImporterRegistry.importer(for: url) else {
+                loadError = "Unsupported book format."
+                return
+            }
             let imported = try await importer.importBook(from: url)
             segments = imported.segments
             // Backfill cover for books imported before the filename

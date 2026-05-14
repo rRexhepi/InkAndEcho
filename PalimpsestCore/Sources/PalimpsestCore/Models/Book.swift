@@ -8,7 +8,10 @@ public final class Book {
     public var author: String
     public var coverImageData: Data?
 
-    /// On-disk URL of the EPUB. PDFs are converted at import time and not stored as PDF.
+    /// On-disk URL of the book file. Stored as `book.<ext>` where `<ext>`
+    /// is the format's canonical extension (epub / mobi / pdf). The reader
+    /// dispatches to the right `EBookImporter` via `EBookImporterRegistry`
+    /// on each open.
     public var ebookFileURL: URL?
     /// On-disk URL of the .m4b (or other audiobook format) file.
     public var audiobookFileURL: URL?
