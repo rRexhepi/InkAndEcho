@@ -1,7 +1,6 @@
 import SwiftUI
+import PalimpsestCore
 
-/// User-selectable theme. Mapped to a `ColorScheme?` — `nil` follows the
-/// system appearance, the others force the override.
 enum ThemeChoice: String, CaseIterable, Identifiable {
     case system
     case light
@@ -16,14 +15,6 @@ enum ThemeChoice: String, CaseIterable, Identifiable {
         case .dark:   return "Dark"
         }
     }
-
-    var colorScheme: ColorScheme? {
-        switch self {
-        case .system: return nil
-        case .light:  return .light
-        case .dark:   return .dark
-        }
-    }
 }
 
 /// Persisted user preferences, backed by `@AppStorage`. Read these via
@@ -32,11 +23,31 @@ enum ThemeChoice: String, CaseIterable, Identifiable {
 enum AppSettings {
     static let themeKey = "palimpsest.theme"
     static let animationsEnabledKey = "palimpsest.animationsEnabled"
+    /// Defaults true everywhere except Mac Catalyst, where text-selection
+    /// drag conflicts with edge-pan-to-flip.
+    static let swipeToFlipEnabledKey = "palimpsest.swipeToFlipEnabled"
+    /// Color applied when the user taps / drags to highlight a word.
+    static let defaultHighlightColorKey = "palimpsest.defaultHighlightColor"
+
+    static var swipeToFlipDefault: Bool {
+        #if targetEnvironment(macCatalyst)
+        return false
+        #else
+        return true
+        #endif
+    }
+
+    static func defaultHighlightColor() -> AnnotationColor {
+        let raw = UserDefaults.standard.string(forKey: defaultHighlightColorKey) ?? AnnotationColor.amber.rawValue
+        return AnnotationColor(rawValue: raw) ?? .amber
+    }
 }
 
 struct SettingsView: View {
     @AppStorage(AppSettings.themeKey) private var themeRaw: String = ThemeChoice.system.rawValue
     @AppStorage(AppSettings.animationsEnabledKey) private var animationsEnabled: Bool = true
+    @AppStorage(AppSettings.swipeToFlipEnabledKey) private var swipeToFlipEnabled: Bool = AppSettings.swipeToFlipDefault
+    @AppStorage(AppSettings.defaultHighlightColorKey) private var defaultHighlightColorRaw: String = AnnotationColor.amber.rawValue
 
     /// Theme value as the sheet was first opened. Used on iOS to detect
     /// "user changed the theme" so we can show the restart prompt — iOS
@@ -71,6 +82,20 @@ struct SettingsView: View {
                 Text("Turn off if you prefer instant page changes.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
+
+                #if targetEnvironment(macCatalyst)
+                Toggle("Swipe to flip pages", isOn: $swipeToFlipEnabled)
+                Text("Off by default on Mac so click-drag selects text. Arrow keys and edge taps still flip the page.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                #endif
+            }
+
+            Section("Highlights") {
+                highlightColorRow
+                Text("Used when you tap or drag-paint a word.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
         }
         .formStyle(.grouped)
@@ -80,6 +105,30 @@ struct SettingsView: View {
         #if os(macOS)
         .frame(width: 460, height: 220)
         #endif
+    }
+
+    private var highlightColorRow: some View {
+        HStack(spacing: 14) {
+            Text("Default color")
+            Spacer()
+            ForEach(AnnotationColor.allCases, id: \.self) { color in
+                Button {
+                    defaultHighlightColorRaw = color.rawValue
+                } label: {
+                    Circle()
+                        .fill(color.swatch)
+                        .overlay(
+                            Circle().stroke(
+                                color.rawValue == defaultHighlightColorRaw ? Theme.ink : Theme.hairline,
+                                lineWidth: color.rawValue == defaultHighlightColorRaw ? 2 : 1
+                            )
+                        )
+                        .frame(width: 24, height: 24)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(color.rawValue.capitalized)
+            }
+        }
     }
 
     #if os(iOS)

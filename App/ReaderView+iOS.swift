@@ -40,7 +40,8 @@ extension ReaderView {
                     currentIndex: iosCurlBinding,
                     useSpread: useSpread,
                     pageBuilder: { idx in iosBuildPage(at: idx) },
-                    flipController: $iosFlipController
+                    flipController: $iosFlipController,
+                    swipeToFlipEnabled: swipeToFlipEnabled
                 )
                 // Re-create the container whenever the boundary budget OR
                 // spread mode flips so UIPageViewController throws away its
@@ -93,6 +94,19 @@ extension ReaderView {
         }
         .frame(maxWidth: .infinity)
         .background(Theme.canvasCool)
+        .focusable()
+        .onKeyPress(.leftArrow) {
+            iosFlipController?(false)
+            return .handled
+        }
+        .onKeyPress(.rightArrow) {
+            iosFlipController?(true)
+            return .handled
+        }
+        .onKeyPress(.space) {
+            iosFlipController?(true)
+            return .handled
+        }
         .task(id: "\(segments.count)-\(useSpread)") {
             recomputeFlatPageBoundaries(useSpread: useSpread)
         }

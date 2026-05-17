@@ -9,7 +9,6 @@ import UIKit
 /// while the audiobook plays at 1× rate.
 enum HighlightMode {
     case word
-    case sentence
     case none
 }
 
@@ -34,8 +33,15 @@ struct ParagraphRow: View {
     let onAddNote: () -> Void
     let onTapNote: (Annotation) -> Void
     let onDelete: (Annotation) -> Void
+    let onToggleWord: (Int) -> Void
+    let onPaintWord: (Int) -> Void
 
-    private var highlight: Annotation? { annotations.first(where: { $0.kind == .highlight }) }
+    /// Paragraph-level highlight only. Word-level highlights (locator has a
+    /// `w<index>` suffix) tint just the word via `wordHighlights`; matching
+    /// them here would also light up the wide paragraph pill.
+    private var highlight: Annotation? {
+        annotations.first(where: { $0.kind == .highlight && $0.wordLocation == nil })
+    }
     private var bookmark: Annotation? { annotations.first(where: { $0.kind == .bookmark }) }
     private var notes: [Annotation] { annotations.filter { $0.kind == .note } }
 
@@ -85,26 +91,27 @@ struct ParagraphRow: View {
     }
 
     private var paragraphText: some View {
-        Text(buildAttributedString())
-            .font(.system(size: 17, design: .serif))
-            .lineSpacing(8)
-            .foregroundStyle(Theme.ink)
-            .tint(Theme.ink)
-            .textSelection(.enabled)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.horizontal, highlight != nil ? 8 : 0)
-            .padding(.vertical, highlight != nil ? 4 : 0)
-            .background(highlightBackground)
-            .clipShape(RoundedRectangle(cornerRadius: 4))
-            .contextMenu { contextMenuContent }
+        let (attrString, ranges) = buildAttributedString()
+        return HighlightableTextView(
+            attributedString: attrString,
+            wordRanges: ranges,
+            onToggleWord: onToggleWord,
+            onPaintWord: onPaintWord
+        )
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, highlight != nil ? 8 : 0)
+        .padding(.vertical, highlight != nil ? 4 : 0)
+        .background(highlightBackground)
+        .clipShape(RoundedRectangle(cornerRadius: 4))
+        .contextMenu { contextMenuContent }
     }
 
-    private func buildAttributedString() -> AttributedString {
+    private func buildAttributedString() -> (AttributedString, [(localIndex: Int, range: NSRange)]) {
         var result = AttributedString()
         var inWord = false
         var wordStart = text.startIndex
         var localWordIdx = 0
-        var ranges: [(local: Int, range: Range<AttributedString.Index>)] = []
+        var attrRanges: [(local: Int, range: Range<AttributedString.Index>)] = []
 
         var i = text.startIndex
         while i < text.endIndex {
@@ -112,7 +119,7 @@ struct ParagraphRow: View {
             if ch.isWhitespace || ch.isNewline {
                 if inWord {
                     let wordSlice = String(text[wordStart..<i])
-                    appendWord(wordSlice, localIndex: localWordIdx, into: &result, ranges: &ranges)
+                    appendWord(wordSlice, localIndex: localWordIdx, into: &result, ranges: &attrRanges)
                     localWordIdx += 1
                     inWord = false
                 }
@@ -127,91 +134,34 @@ struct ParagraphRow: View {
         }
         if inWord {
             let wordSlice = String(text[wordStart..<text.endIndex])
-            appendWord(wordSlice, localIndex: localWordIdx, into: &result, ranges: &ranges)
+            appendWord(wordSlice, localIndex: localWordIdx, into: &result, ranges: &attrRanges)
         }
 
         if let active = activeLocalWordIndex {
             switch highlightMode {
             case .word:
-                if let entry = ranges.first(where: { $0.local == active }) {
+                if let entry = attrRanges.first(where: { $0.local == active }) {
                     result[entry.range].backgroundColor = Theme.highlightWordSoft
-                }
-            case .sentence:
-                if let sentenceRange = sentenceCharRange(containingWordAt: active),
-                   let attrSubrange = attributedRange(for: sentenceRange, in: result) {
-                    result[attrSubrange].backgroundColor = Theme.highlightSentence.opacity(0.20)
                 }
             case .none:
                 break
             }
         }
 
-        return result
-    }
-
-    private func sentenceCharRange(containingWordAt localIdx: Int) -> NSRange? {
-        let nsText = text as NSString
-        var wordRanges: [NSRange] = []
-        var inWord = false
-        var wordStart = 0
-        for i in 0..<nsText.length {
-            let scalar = Unicode.Scalar(nsText.character(at: i))
-            let isWS = scalar.map { CharacterSet.whitespacesAndNewlines.contains($0) } ?? false
-            if isWS {
-                if inWord {
-                    wordRanges.append(NSRange(location: wordStart, length: i - wordStart))
-                    inWord = false
-                }
-            } else if !inWord {
-                wordStart = i
-                inWord = true
-            }
+        let nsRanges: [(localIndex: Int, range: NSRange)] = attrRanges.map { entry in
+            (entry.local, NSRange(entry.range, in: result))
         }
-        if inWord {
-            wordRanges.append(NSRange(location: wordStart, length: nsText.length - wordStart))
-        }
-        guard localIdx >= 0, localIdx < wordRanges.count else { return nil }
-
-        let wordCenter = wordRanges[localIdx].location + wordRanges[localIdx].length / 2
-
-        var match: NSRange?
-        text.enumerateSubstrings(
-            in: text.startIndex..<text.endIndex,
-            options: .bySentences
-        ) { _, range, _, stop in
-            let start = text.distance(from: text.startIndex, to: range.lowerBound)
-            let end = text.distance(from: text.startIndex, to: range.upperBound)
-            if wordCenter >= start && wordCenter < end {
-                match = NSRange(location: start, length: end - start)
-                stop = true
-            }
-        }
-        return match
-    }
-
-    private func attributedRange(for nsRange: NSRange, in attributed: AttributedString) -> Range<AttributedString.Index>? {
-        guard let stringRange = Range(nsRange, in: text) else { return nil }
-        let sentenceText = String(text[stringRange])
-        return attributed.range(of: sentenceText)
+        return (result, nsRanges)
     }
 
     private func appendWord(_ word: String, localIndex: Int, into result: inout AttributedString, ranges: inout [(local: Int, range: Range<AttributedString.Index>)]) {
         var attr = AttributedString(word)
         attr.foregroundColor = Theme.ink
-        // Word-level highlight: tinted background on just this word. The
-        // paragraph-level highlight (the wider pill) is rendered separately
-        // by `highlightBackground` so both can coexist visually.
+        // Per-word background. The wider paragraph-level pill is drawn
+        // separately in `highlightBackground` so both can coexist.
         if let wordColor = wordHighlights[localIndex] {
             attr.backgroundColor = colorView(for: wordColor).opacity(0.30)
         }
-        #if !os(macOS)
-        // Tap target. Routed to the parent via OpenURL → handleHighlightURL
-        // → toggleWordHighlight. Long-press still falls through to the
-        // system text-selection menu because `.link` only claims a tap.
-        if let url = URL(string: "palimpsest://highlight/\(paragraphIndex)/\(localIndex)") {
-            attr.link = url
-        }
-        #endif
         let start = result.endIndex
         result.append(attr)
         let end = result.endIndex
@@ -297,15 +247,7 @@ struct ParagraphRow: View {
         }
     }
 
-    private func colorView(for color: AnnotationColor) -> Color {
-        switch color {
-        case .amber: return Color(red: 199/255, green: 151/255, blue: 63/255)
-        case .sage:  return Color(red: 155/255, green: 171/255, blue: 142/255)
-        case .rose:  return Color(red: 192/255, green: 149/255, blue: 147/255)
-        case .slate: return Color(red: 122/255, green: 135/255, blue: 148/255)
-        case .plum:  return Color(red: 155/255, green: 126/255, blue: 146/255)
-        }
-    }
+    private func colorView(for color: AnnotationColor) -> Color { color.swatch }
 
     @ViewBuilder
     private func colorPickerButton(for color: AnnotationColor) -> some View {

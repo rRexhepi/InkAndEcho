@@ -25,24 +25,12 @@ public protocol AudioTextAligner: Sendable {
 /// without external alignment models.
 public struct WhisperAligner: AudioTextAligner {
     public let modelIdentifier: String
-    public let lookahead: Int
 
-    /// `base.en` is the default — the model the old standalone macOS app
-    /// shipped with, before the Catalyst unification. On Apple silicon it
-    /// runs at ~16× realtime via Core ML + ANE (so a 6 h audiobook aligns
-    /// in ~22 min) and meaningfully improves word recognition over tiny.en,
-    /// which translates to more usable anchors when the narrator paraphrases
-    /// or adds filler. Heavier models can still be passed explicitly.
-    public init(modelIdentifier: String = "openai_whisper-base.en", lookahead: Int = 10) {
+    /// `base.en`: ~16× realtime on Apple silicon via Core ML + ANE; meaningfully
+    /// better word recognition than tiny.en. Override for heavier models.
+    public init(modelIdentifier: String = "openai_whisper-base.en") {
         self.modelIdentifier = modelIdentifier
-        self.lookahead = lookahead
     }
-
-    /// Common narrator filler/disfluency tokens. We skip these in the audio
-    /// stream when looking for the next book word match.
-    private static let fillerTokens: Set<String> = [
-        "uh", "um", "ah", "er", "mm", "hmm", "huh", "eh", "oh"
-    ]
 
     public func align(audioURL: URL, input: AlignmentInput) async throws -> AlignmentMap {
         try await align(audioURL: audioURL, input: input) { _ in }

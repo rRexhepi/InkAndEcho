@@ -39,7 +39,6 @@ struct LibraryView: View {
             } message: {
                 Text(importError ?? "")
             }
-            #if os(iOS)
             .fullScreenCover(isPresented: Binding(
                 get: { !hasCompletedOnboarding },
                 set: { _ in }
@@ -61,26 +60,9 @@ struct LibraryView: View {
                         }
                 }
             }
-            #endif
     }
 
-    /// On iOS we want a single-stack flow: Library → push ReaderView. On
-    /// macOS we keep the two-column NavigationSplitView since the desktop
-    /// reader chrome owns its own internal sidebar.
-    @ViewBuilder
     private var rootLayout: some View {
-        #if os(macOS)
-        NavigationSplitView {
-            sidebar
-                .frame(minWidth: 240, idealWidth: 280)
-        } detail: {
-            if let book = selectedBook {
-                ReaderView(book: book)
-            } else {
-                emptyDetail
-            }
-        }
-        #else
         NavigationStack {
             iosLibraryGrid
                 .navigationTitle("Library")
@@ -115,65 +97,8 @@ struct LibraryView: View {
                 }
         }
         .tint(Theme.accent)
-        #endif
     }
 
-    // MARK: - macOS sidebar
-
-    #if os(macOS)
-    private var sidebar: some View {
-        VStack(spacing: 0) {
-            ScrollView {
-                LazyVStack(alignment: .leading, spacing: 4) {
-                    ForEach(books) { book in
-                        let isSelected = selectedBook == book
-                        BookRow(book: book)
-                            .padding(.horizontal, 8)
-                            .padding(.vertical, 6)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .background(isSelected ? Theme.accent : Color.clear)
-                            .foregroundStyle(isSelected ? Theme.onAccent : Theme.ink)
-                            .clipShape(RoundedRectangle(cornerRadius: 8))
-                            .contentShape(Rectangle())
-                            .onTapGesture {
-                                selectedBook = book
-                            }
-                            .contextMenu {
-                                Button(role: .destructive) {
-                                    deleteBook(book)
-                                } label: {
-                                    Label("Remove from Library", systemImage: "trash")
-                                }
-                            }
-                    }
-                }
-                .padding(.horizontal, 8)
-                .padding(.vertical, 8)
-            }
-            .background(Theme.canvasCool)
-        }
-        .toolbar {
-            ToolbarItem(placement: .primaryAction) {
-                Button {
-                    showingImporter = true
-                } label: {
-                    if importing {
-                        ProgressView().controlSize(.small)
-                    } else {
-                        Label("Import", systemImage: "plus")
-                    }
-                }
-                .disabled(importing)
-            }
-        }
-        .navigationTitle("Library")
-        .background(Theme.canvasCool)
-    }
-    #endif
-
-    // MARK: - iOS grid
-
-    #if os(iOS)
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
 
     private var iosLibraryGrid: some View {
@@ -211,42 +136,8 @@ struct LibraryView: View {
         let count = horizontalSizeClass == .regular ? 4 : 2
         return Array(repeating: GridItem(.flexible(), spacing: 24, alignment: .top), count: count)
     }
-    #endif
 
-    // MARK: - Empty + helpers
-
-    #if os(macOS)
-    private var emptyDetail: some View {
-        VStack(spacing: 12) {
-            Image(systemName: "books.vertical")
-                .font(.system(size: 56))
-                .foregroundStyle(Theme.inkMuted)
-            Text(books.isEmpty ? "Import an ebook to get started" : "Select a book")
-                .font(.system(.title3, design: .serif))
-                .foregroundStyle(Theme.inkSoft)
-            if books.isEmpty {
-                Button {
-                    showingImporter = true
-                } label: {
-                    Label("Import .epub, .mobi, or .pdf", systemImage: "plus")
-                        .padding(.horizontal, 16)
-                        .padding(.vertical, 8)
-                }
-                .buttonStyle(.plain)
-                .background(Theme.accent)
-                .foregroundStyle(Theme.onAccent)
-                .clipShape(RoundedRectangle(cornerRadius: 6))
-            }
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(Theme.canvas)
-    }
-    #endif
-
-    /// EPUB, MOBI/PRC/AZW, and PDF. EPUB and MOBI are parsed by pure-Swift
-    /// importers; PDF goes through PDFKit. All paths are App Sandbox-safe.
-    /// AZW3 / KF8 deliberately omitted — the in-tree MOBI parser throws on
-    /// KF8 payloads.
+    /// AZW3 / KF8 deliberately omitted — the in-tree MOBI parser throws on KF8.
     private var importContentTypes: [UTType] {
         var types: [UTType] = [.epub, .pdf]
         if let mobi = UTType(filenameExtension: "mobi") { types.append(mobi) }
@@ -292,74 +183,6 @@ struct LibraryView: View {
     }
 }
 
-// MARK: - macOS list row
-
-#if os(macOS)
-private struct BookRow: View {
-    let book: Book
-
-    var body: some View {
-        HStack(spacing: 12) {
-            CoverThumb(data: book.coverImageData)
-            VStack(alignment: .leading, spacing: 2) {
-                Text(book.title)
-                    .font(.system(.body, design: .serif))
-                    .lineLimit(2)
-                    .foregroundStyle(Theme.ink)
-                Text(book.author)
-                    .font(.caption)
-                    .foregroundStyle(Theme.inkMuted)
-                if book.audiobookFileURL == nil {
-                    Text("No audio")
-                        .font(.caption2)
-                        .foregroundStyle(Theme.inkMuted)
-                        .padding(.horizontal, 6)
-                        .padding(.vertical, 1)
-                        .background(Theme.canvasDeep)
-                        .clipShape(Capsule())
-                }
-            }
-            Spacer(minLength: 0)
-        }
-        .padding(.vertical, 4)
-    }
-}
-
-private struct CoverThumb: View {
-    let data: Data?
-
-    var body: some View {
-        Group {
-            if let data, let image = Image(platformData: data) {
-                image
-                    .resizable()
-                    .aspectRatio(contentMode: .fill)
-            } else {
-                Theme.canvasDeep
-                    .overlay(
-                        Image(systemName: "book.closed")
-                            .foregroundStyle(Theme.inkMuted)
-                            .font(.system(size: 16))
-                    )
-            }
-        }
-        .frame(width: 36, height: 52)
-        .clipShape(RoundedRectangle(cornerRadius: 2))
-        .overlay(
-            RoundedRectangle(cornerRadius: 2)
-                .stroke(Theme.hairlineStrong, lineWidth: 0.5)
-        )
-    }
-}
-#endif
-
-// MARK: - iOS book card
-
-#if os(iOS)
-/// Cover-first card used in the iOS library grid. Shows a 2:3 cover
-/// rectangle (real cover if available, generated fallback otherwise),
-/// title + author beneath, and a thin reading-progress bar or "no audio"
-/// badge per the iPad mock.
 private struct BookCard: View {
     let book: Book
 
@@ -496,4 +319,3 @@ private struct LibraryEmptyState: View {
         }
     }
 }
-#endif

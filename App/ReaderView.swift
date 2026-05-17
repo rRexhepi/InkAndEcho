@@ -60,6 +60,7 @@ struct ReaderView: View {
     @State var iosShowChapterSheet: Bool = false
     @State var iosShowAudioSheet: Bool = false
     @State var iosShowSettings: Bool = false
+    @AppStorage(AppSettings.swipeToFlipEnabledKey) var swipeToFlipEnabled: Bool = AppSettings.swipeToFlipDefault
     @State var iosDragProgress: Double = 0
     @State var iosDragDirection: DogEarPageTurn.Direction = .forward
     @State var iosDragActive: Bool = false
@@ -101,19 +102,6 @@ struct ReaderView: View {
         readerLayout
             .background(Theme.canvas)
             .navigationTitle(book.title)
-            #if os(macOS)
-            .navigationSubtitle(book.author)
-            #endif
-        #if os(iOS)
-        // Per-word tap on iOS goes through `attr.link = palimpsest://
-        // highlight/<paragraph>/<localWord>` in `ParagraphRow.appendWord`,
-        // which SwiftUI fires through the `openURL` environment. `.handled`
-        // for our scheme so iOS doesn't try to open it externally;
-        // `.systemAction` for anything else lets normal links work.
-        .environment(\.openURL, OpenURLAction { url in
-            handleWordTapURL(url)
-        })
-        #endif
         .onChange(of: engine.currentTime) { _, _ in
             refreshActiveWord()
             saveProgressIfNeeded()
@@ -270,10 +258,8 @@ struct ReaderView: View {
         }
     }
 
-    /// Toggle a word-level highlight. Tap an unhighlighted word → add an
-    /// `amber` highlight on just that word. Tap a highlighted word →
-    /// remove it. Paragraph-level highlights (`⋯` → Highlight → color)
-    /// stay independent and continue to render as the wider pill.
+    /// Tap → toggle a word-level highlight (amber by default). Drag/paint
+    /// goes through `paintWordHighlight`, which only adds.
     func toggleWordHighlight(segmentID: String, paragraphIndex: Int, wordIndex: Int) {
         let locator = Annotation.locator(
             segmentID: segmentID,
@@ -285,43 +271,40 @@ struct ReaderView: View {
         }) {
             modelContext.delete(existing)
         } else {
-            let annotation = Annotation(
+            insertAnnotation(Annotation(
                 book: book,
                 cfiStart: locator,
                 cfiEnd: locator,
                 kind: .highlight,
-                color: .amber
-            )
-            insertAnnotation(annotation)
+                color: AppSettings.defaultHighlightColor()
+            ))
         }
         try? modelContext.save()
         annotationRevision &+= 1
     }
 
-    #if os(iOS)
-    /// Parses `palimpsest://highlight/<paragraph>/<localWord>` URLs the
-    /// `AttributedString.link` taps emit and toggles the word's highlight.
-    /// Hands anything else back to the system so normal external links in
-    /// notes / annotations work unchanged.
-    func handleWordTapURL(_ url: URL) -> OpenURLAction.Result {
-        guard url.scheme == "palimpsest", url.host == "highlight" else {
-            return .systemAction
-        }
-        let parts = url.pathComponents.filter { !$0.isEmpty && $0 != "/" }
-        guard parts.count >= 2,
-              let paragraphIdx = Int(parts[0]),
-              let localWordIdx = Int(parts[1]),
-              let segment = currentSegment else {
-            return .handled
-        }
-        toggleWordHighlight(
-            segmentID: segment.id,
-            paragraphIndex: paragraphIdx,
-            wordIndex: localWordIdx
+    /// Drag-paint: insert a word highlight if absent; no-op if it already
+    /// exists. Toggling mid-drag would erase highlights as the finger crossed
+    /// them, which reads as a glitch.
+    func paintWordHighlight(segmentID: String, paragraphIndex: Int, wordIndex: Int) {
+        let locator = Annotation.locator(
+            segmentID: segmentID,
+            paragraphIndex: paragraphIndex,
+            wordIndex: wordIndex
         )
-        return .handled
+        if book.annotations.contains(where: { $0.cfiStart == locator && $0.kind == .highlight }) {
+            return
+        }
+        insertAnnotation(Annotation(
+            book: book,
+            cfiStart: locator,
+            cfiEnd: locator,
+            kind: .highlight,
+            color: AppSettings.defaultHighlightColor()
+        ))
+        try? modelContext.save()
+        annotationRevision &+= 1
     }
-    #endif
 
     func saveNote() {
         let trimmed = noteText.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -389,17 +372,8 @@ struct ReaderView: View {
 
     // MARK: - Layout
 
-    @ViewBuilder
     var readerLayout: some View {
-        #if os(macOS)
-        HSplitView {
-            chapterList
-                .frame(minWidth: 220, idealWidth: 260, maxWidth: 320)
-            mainColumn
-        }
-        #else
         iosReaderLayout
-        #endif
     }
 
     var mainColumn: some View {
@@ -710,58 +684,9 @@ struct ReaderView: View {
             } else if let loadError {
                 Text(loadError).font(.callout).foregroundStyle(.red).padding()
             } else if !segments.isEmpty, paginated, flatTotalPages > 0 {
-                #if os(macOS)
-                // Rich book chrome on top of NSPageController.stackBook.
-                // The flip animation is the same; the surrounding
-                // treatment (page-stack edges, multi-layer ground shadow,
-                // gutter shadow inside each page, paper-grain ground)
-                // makes the spread feel like a physical object on a desk.
-                GeometryReader { geo in
-                    let useSpread = geo.size.width >= Self.spreadModeMinWidth
-                    ZStack {
-                        // Page-stack edges — left side shows pages already
-                        // turned, right side shows pages remaining. Their
-                        // visible "depth" hints at where you are in the book.
-                        HStack(spacing: 0) {
-                            macPageStackEdge(side: .left)
-                            Spacer(minLength: 0)
-                            macPageStackEdge(side: .right)
-                        }
-                        .padding(.horizontal, 24)
-                        .padding(.vertical, 32)
-
-                        PageCurlReaderMacContainer(
-                            totalPages: flatTotalPages,
-                            currentIndex: macCurlBinding,
-                            useSpread: useSpread,
-                            pageBuilder: { idx, position in macBuildPage(at: idx, position: position) }
-                        )
-                        .id("mac-curl-\(useSpread ? "spread" : "single")-\(flatBoundariesBudget)-\(segments.count)")
-                        .clipShape(RoundedRectangle(cornerRadius: 6))
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 6)
-                                .stroke(Theme.hairlineStrong, lineWidth: 1)
-                        )
-                        // Three-layer drop shadow for real depth: a tight
-                        // contact shadow, a soft mid shadow, and a wide
-                        // ambient shadow. One shadow looks pasted; this
-                        // looks like a book sitting on a surface.
-                        .shadow(color: Color.black.opacity(0.10), radius: 4,  x: 0, y: 2)
-                        .shadow(color: Color.black.opacity(0.16), radius: 14, x: 0, y: 6)
-                        .shadow(color: Color.black.opacity(0.06), radius: 32, x: 0, y: 16)
-                        .padding(.horizontal, 32)
-                        .padding(.vertical, 24)
-                        .task(id: "\(segments.count)-\(useSpread)") {
-                            recomputeFlatPageBoundaries(useSpread: useSpread)
-                        }
-                    }
-                }
-                .background(macPaperGround)
-                #else
                 if let segment = currentSegment {
                     paginatedView(segment: segment)
                 }
-                #endif
             } else if let segment = currentSegment {
                 scrollView(segment: segment)
             } else {
@@ -1159,15 +1084,8 @@ struct ReaderView: View {
     /// highlight on its left and a feathered shadow on its right gives the
     /// spread a paper-indent feel rather than a flat divider.
     func spineSeparator(height: CGFloat) -> some View {
-        let highlight: Color
-        let shadow: Color
-        #if os(macOS)
-        highlight = colorScheme == .dark ? Color.white.opacity(0.04) : Color.white.opacity(0.5)
-        shadow = colorScheme == .dark ? Color.black.opacity(0.5) : Color(red: 31/255, green: 26/255, blue: 20/255).opacity(0.12)
-        #else
-        highlight = Color.white.opacity(0.5)
-        shadow = Color(red: 31/255, green: 26/255, blue: 20/255).opacity(0.12)
-        #endif
+        let highlight = Color.white.opacity(0.5)
+        let shadow = Color(red: 31/255, green: 26/255, blue: 20/255).opacity(0.12)
         return ZStack(alignment: .center) {
             // Feathered shadow on the right of the spine.
             LinearGradient(
@@ -1320,6 +1238,20 @@ struct ReaderView: View {
                 modelContext.delete(annotation)
                 try? modelContext.save()
                 annotationRevision &+= 1
+            },
+            onToggleWord: { localWordIdx in
+                toggleWordHighlight(
+                    segmentID: segmentID,
+                    paragraphIndex: paragraphIndex,
+                    wordIndex: localWordIdx
+                )
+            },
+            onPaintWord: { localWordIdx in
+                paintWordHighlight(
+                    segmentID: segmentID,
+                    paragraphIndex: paragraphIndex,
+                    wordIndex: localWordIdx
+                )
             }
         )
     }
@@ -1703,30 +1635,6 @@ struct ReaderView: View {
     var currentSegment: TextSegment? {
         guard let id = selectedSegmentID ?? segments.first?.id else { return nil }
         return segments.first(where: { $0.id == id })
-    }
-
-    var activeSentenceText: String? {
-        guard let active = activeWord,
-              let segment = currentSegment,
-              segment.id == active.segmentId else { return nil }
-
-        // Find which sentence in segment.text contains the active word index.
-        let ranges = sentenceWordRanges(in: segment.text)
-        guard let sIdx = ranges.firstIndex(where: { active.wordIndex >= $0.start && active.wordIndex < $0.end }) else {
-            return nil
-        }
-
-        var sentences: [String] = []
-        segment.text.enumerateSubstrings(
-            in: segment.text.startIndex..<segment.text.endIndex,
-            options: .bySentences
-        ) { sub, _, _, _ in
-            if let s = sub {
-                sentences.append(s.trimmingCharacters(in: .whitespacesAndNewlines))
-            }
-        }
-        guard sIdx < sentences.count else { return nil }
-        return sentences[sIdx]
     }
 
     func sentenceWordRanges(in text: String) -> [(start: Int, end: Int)] {

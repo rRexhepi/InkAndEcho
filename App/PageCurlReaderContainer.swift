@@ -2,37 +2,19 @@
 import SwiftUI
 import UIKit
 
-/// SwiftUI wrapper around `UIPageViewController(transitionStyle: .pageCurl)`
-/// — the same page-curl Apple's Books app uses. Replaces the custom
-/// SwiftUI dog-ear on iOS so we get gesture-driven page lifting, the
-/// peek-the-next-page-when-you-lift-the-corner behavior, swipe-velocity-
-/// aware completion, and a proper cylindrical curl that ends at the page
-/// edge instead of a half-spread overlay.
-///
-/// Pages are addressed by a flat 0..<totalPages index that the parent is
-/// responsible for mapping to (chapter, pageInChapter). Each page is built
-/// on demand by `pageBuilder(globalIndex)`. The coordinator updates
-/// `currentIndex` whenever the user lands on a new page so the parent's
-/// SwiftData progress + chapter-list selection stays in sync.
 struct PageCurlReaderContainer: UIViewControllerRepresentable {
     let totalPages: Int
     @Binding var currentIndex: Int
-    /// `true` for iPad landscape — show two pages side-by-side and curl one
-    /// at a time, like Books.app. `false` for iPhone and iPad portrait —
-    /// single-page curl. Switching this value rebuilds the container (the
-    /// caller should change the SwiftUI `.id` so a new instance is built).
+    /// Toggling at runtime requires rebuilding — bump the SwiftUI `.id`.
     let useSpread: Bool
     let pageBuilder: (Int) -> AnyView
-    /// Filled by the container so SwiftUI parents can request an animated
-    /// page flip (i.e. with the curl animation, not a snap). Tap-to-flip
-    /// zones call this; chapter picks / progress restoration go through
-    /// `currentIndex` directly and snap.
+    /// Escape hatch for imperative animated flips. Snap flips go through `currentIndex`.
     @Binding var flipController: ((Bool) -> Void)?
+    /// When false, the PVC's built-in pan recognizers are disabled. Arrow
+    /// keys and edge taps still flip; click-drag is free for text selection.
+    var swipeToFlipEnabled: Bool = true
 
     func makeUIViewController(context: Context) -> UIPageViewController {
-        // `.mid` spine asks the PVC to display two view controllers side
-        // by side and curl the one the user grabs. Default `.min` is the
-        // single-page curl.
         let options: [UIPageViewController.OptionsKey: Any] = useSpread
             ? [.spineLocation: NSNumber(value: UIPageViewController.SpineLocation.mid.rawValue)]
             : [:]
@@ -43,29 +25,34 @@ struct PageCurlReaderContainer: UIViewControllerRepresentable {
         )
         pvc.dataSource = context.coordinator
         pvc.delegate = context.coordinator
-        // The back of the curling page in `.pageCurl` mode shows the
-        // PVC view's own background (and the child hosting view's, since
-        // the hosting view sits inside it). Default `.systemBackground`
-        // is white in light mode and reads as a stark sheet of paper
-        // flipping over the parchment. Match the canvas color so the
-        // curl reads as a single uniform leaf.
+        // iOS ≤25: this paints the curl-back face parchment instead of white.
+        // iOS 26: regression — `.pageCurl` hardcodes the back face to white
+        // regardless of this. Left set for older iOS and in case Apple fixes it.
         pvc.view.backgroundColor = Self.parchmentCanvasUIColor
         pvc.view.isOpaque = true
         if totalPages > 0 {
             setControllers(on: pvc, animated: false, direction: .forward)
         }
-        // Hand the coordinator's flip helper back to SwiftUI so taps can
-        // drive an animated flip without going through the binding (the
-        // binding path is reserved for instant snaps).
+        applySwipeEnabled(to: pvc)
+        // Deferred so the binding write happens after representable construction.
         DispatchQueue.main.async { [weak coord = context.coordinator] in
             flipController = { forward in coord?.flipPage(forward: forward) }
         }
         return pvc
     }
 
-    /// Same parchment as `Theme.canvas`, expressed as a trait-aware UIColor
-    /// so it follows light / dark mode automatically. Kept in sync with
-    /// `Theme.swift`'s canvas tokens.
+    /// `UIPageViewController.pageCurl` exposes its swipe / pan via the PVC
+    /// view's gesture recognizers. Disabling them leaves edge taps + the
+    /// imperative flipController (arrow keys) as the remaining flip paths.
+    private func applySwipeEnabled(to pvc: UIPageViewController) {
+        for g in pvc.view.gestureRecognizers ?? [] {
+            if g is UIPanGestureRecognizer || g is UIScreenEdgePanGestureRecognizer {
+                g.isEnabled = swipeToFlipEnabled
+            }
+        }
+    }
+
+    /// Mirror of `Theme.canvas` — UIKit needs `UIColor`. Keep in sync.
     static let parchmentCanvasUIColor = UIColor { trait in
         trait.userInterfaceStyle == .dark
             ? UIColor(red:  27/255, green:  24/255, blue:  21/255, alpha: 1)
@@ -73,18 +60,13 @@ struct PageCurlReaderContainer: UIViewControllerRepresentable {
     }
 
     func updateUIViewController(_ pvc: UIPageViewController, context: Context) {
-        // Sync external currentIndex changes. The `animated` flag here
-        // determines whether the page transition uses the curl animation
-        // (e.g. when the user taps left/right to flip) or jumps instantly
-        // (e.g. picking a chapter from the drawer). The coordinator tracks
-        // the most recent intent.
+        applySwipeEnabled(to: pvc)
         guard totalPages > 0 else { return }
         let safe = max(0, min(currentIndex, totalPages - 1))
         let visible = pvc.viewControllers?.compactMap { ($0 as? IndexedHostingController)?.pageIndex } ?? []
         let animated = context.coordinator.consumeAnimatedFlip()
         if useSpread {
-            // In spread mode the visible pair is [left, right] = [N, N+1].
-            // The "current" position is normalised to the LEFT (even).
+            // Spread: visible pair is `[N, N+1]`; current normalises to the even (LEFT) index.
             let leftIdx = (safe / 2) * 2
             if visible.first == leftIdx { return }
             let direction: UIPageViewController.NavigationDirection =
@@ -98,9 +80,6 @@ struct PageCurlReaderContainer: UIViewControllerRepresentable {
         }
     }
 
-    /// Build the visible-controller set from the current `currentIndex`.
-    /// Single-page = one VC; spread = a pair (left + right), or just the
-    /// left/right alone at the spine ends.
     private func setControllers(
         on pvc: UIPageViewController,
         animated: Bool,
@@ -132,10 +111,8 @@ struct PageCurlReaderContainer: UIViewControllerRepresentable {
 
     final class Coordinator: NSObject, UIPageViewControllerDataSource, UIPageViewControllerDelegate {
         let parent: PageCurlReaderContainer
-        /// Set true from `flipPage(...)` so the very next `updateUIView-
-        /// Controller` honours the curl animation. Cleared after the read
-        /// so unrelated index changes (chapter picks, restoreProgress)
-        /// still snap instantly.
+        /// One-shot — consumed by the next `updateUIViewController` so
+        /// chapter picks and progress restore still snap.
         private var pendingAnimatedFlip = false
 
         init(parent: PageCurlReaderContainer) {
@@ -184,9 +161,7 @@ struct PageCurlReaderContainer: UIViewControllerRepresentable {
             guard finished, completed,
                   let current = pageViewController.viewControllers?.first as? IndexedHostingController
             else { return }
-            // Bounce back to the binding on the next runloop so SwiftUI's
-            // diffing picks it up cleanly without re-entering the
-            // updateUIViewController path mid-animation.
+            // Defer so we don't re-enter the representable update path mid-animation.
             DispatchQueue.main.async {
                 self.parent.currentIndex = current.pageIndex
             }
@@ -194,10 +169,7 @@ struct PageCurlReaderContainer: UIViewControllerRepresentable {
     }
 }
 
-/// `UIHostingController` subclass that remembers which page it represents.
-/// `UIPageViewController` calls `viewControllerBefore/After` with the
-/// existing instance and we read this back to know our position in the
-/// flat page sequence.
+/// Subclass so the data source can recover `pageIndex` from a returned VC.
 final class IndexedHostingController: UIHostingController<AnyView> {
     let pageIndex: Int
 
@@ -205,11 +177,6 @@ final class IndexedHostingController: UIHostingController<AnyView> {
         self.pageIndex = pageIndex
         super.init(rootView: rootView)
         view.backgroundColor = PageCurlReaderContainer.parchmentCanvasUIColor
-        // The back of the curling page in UIPageViewController.pageCurl is
-        // a translucent UIKit layer that lets the view *below* show through.
-        // Marking the hosting view fully opaque + giving it a solid
-        // parchment fill means the curl back reads as a real sheet of
-        // paper instead of frosted glass.
         view.isOpaque = true
         view.layer.isOpaque = true
     }

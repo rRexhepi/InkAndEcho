@@ -9,6 +9,7 @@
 /* Begin PBXBuildFile section */
 		09EEE3B62C58AE92C31D8F7E /* ReaderView+iOS.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8DB91686A2BD3CB5BF1C516C /* ReaderView+iOS.swift */; };
 		14FE8277F23435AA6DC352CA /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = F30EF32DD0942713A3E166DA /* PrivacyInfo.xcprivacy */; };
+		1C1FEB52B0C40F4C4A51C29A /* HighlightableTextView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1CA103ED9E54FADD14E2560B /* HighlightableTextView.swift */; };
 		2FC1E569BF087E638296B9DF /* PageCurlReaderContainer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9BADC5E44EDAF0DEEE7D83D1 /* PageCurlReaderContainer.swift */; };
 		33005D18AC0EAFC63A55D9B0 /* ReaderView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B5BD5DEAC55A01C89175316B /* ReaderView.swift */; };
 		3BF44F5E5E67DD48CBF50725 /* PlatformImage.swift in Sources */ = {isa = PBXBuildFile; fileRef = F09EAB889CF35D567E3A93E7 /* PlatformImage.swift */; };
@@ -23,7 +24,6 @@
 		9A46A8E912D71E51F76126C5 /* OnboardingView.swift in Sources */ = {isa = PBXBuildFile; fileRef = E4CD248F5BEB9F630D7341BB /* OnboardingView.swift */; };
 		A4D9F5D1DADC47C31C40296A /* ParagraphRow.swift in Sources */ = {isa = PBXBuildFile; fileRef = D68D4B3340D7B48F99186ECF /* ParagraphRow.swift */; };
 		A62B162326A787628026378F /* AudioBarView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 11112A4CFA44B2BBA9A1A562 /* AudioBarView.swift */; };
-		A688B2B836846FDC49DC1FAF /* ClickableTextView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C3C612E37CBDB8078E5ACA60 /* ClickableTextView.swift */; };
 		AA01B42854934E606FA5B0B8 /* BookFileResolution.swift in Sources */ = {isa = PBXBuildFile; fileRef = BFAEDAE7F14A8D2618A09EB6 /* BookFileResolution.swift */; };
 		CAEDA9A8EB611692E418531D /* LibraryView.swift in Sources */ = {isa = PBXBuildFile; fileRef = E12A672259931B140AB3EF50 /* LibraryView.swift */; };
 		E4898752F028436ED6D0C9AE /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = AAC8813402811FD327098150 /* Assets.xcassets */; };
@@ -33,10 +33,11 @@
 /* Begin PBXFileReference section */
 		07C54844F8B50D4E9DD630AE /* AlignmentService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AlignmentService.swift; sourceTree = "<group>"; };
 		11112A4CFA44B2BBA9A1A562 /* AudioBarView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AudioBarView.swift; sourceTree = "<group>"; };
+		1CA103ED9E54FADD14E2560B /* HighlightableTextView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HighlightableTextView.swift; sourceTree = "<group>"; };
 		291D8FBF8930897384E49916 /* ImportService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ImportService.swift; sourceTree = "<group>"; };
-		3F480532410A8E3B93C3C665 /* Palimpsest.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Palimpsest.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		3F480532410A8E3B93C3C665 /* PalimpsestiOS.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = PalimpsestiOS.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		5B7FC8B6073EE474B9981B81 /* AudioBarTouchView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AudioBarTouchView.swift; sourceTree = "<group>"; };
-		687FA3EA18F8D2FBB1DE434A /* PalimpsestCore */ = {isa = PBXFileReference; lastKnownFileType = folder; path = PalimpsestCore; sourceTree = SOURCE_ROOT; };
+		687FA3EA18F8D2FBB1DE434A /* PalimpsestCore */ = {isa = PBXFileReference; lastKnownFileType = folder; name = PalimpsestCore; path = PalimpsestCore; sourceTree = SOURCE_ROOT; };
 		6AAD2F302BBE580BBC5B245C /* DogEarPageTurn.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DogEarPageTurn.swift; sourceTree = "<group>"; };
 		7313C39961926BDAD3FBA26C /* Palimpsest.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = Palimpsest.entitlements; sourceTree = "<group>"; };
 		7AE02E4C8321B7B7517AC5A3 /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
@@ -48,12 +49,11 @@
 		AAC8813402811FD327098150 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		B5BD5DEAC55A01C89175316B /* ReaderView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReaderView.swift; sourceTree = "<group>"; };
 		BFAEDAE7F14A8D2618A09EB6 /* BookFileResolution.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BookFileResolution.swift; sourceTree = "<group>"; };
-		C3C612E37CBDB8078E5ACA60 /* ClickableTextView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClickableTextView.swift; sourceTree = "<group>"; };
 		D68D4B3340D7B48F99186ECF /* ParagraphRow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ParagraphRow.swift; sourceTree = "<group>"; };
 		E12A672259931B140AB3EF50 /* LibraryView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LibraryView.swift; sourceTree = "<group>"; };
 		E4CD248F5BEB9F630D7341BB /* OnboardingView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OnboardingView.swift; sourceTree = "<group>"; };
 		F09EAB889CF35D567E3A93E7 /* PlatformImage.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlatformImage.swift; sourceTree = "<group>"; };
-		F30EF32DD0942713A3E166DA /* PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; lastKnownFileType = text.xml; path = PrivacyInfo.xcprivacy; sourceTree = "<group>"; };
+		F30EF32DD0942713A3E166DA /* PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; path = PrivacyInfo.xcprivacy; sourceTree = "<group>"; };
 		FDEEEF08122F75E22ADE8E7E /* PalimpsestApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PalimpsestApp.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
@@ -91,6 +91,7 @@
 			children = (
 				800C4F2C3F71D42A943EB592 /* AnnotationsListSheet.swift */,
 				6AAD2F302BBE580BBC5B245C /* DogEarPageTurn.swift */,
+				1CA103ED9E54FADD14E2560B /* HighlightableTextView.swift */,
 				D68D4B3340D7B48F99186ECF /* ParagraphRow.swift */,
 			);
 			path = Components;
@@ -105,7 +106,6 @@
 				5B7FC8B6073EE474B9981B81 /* AudioBarTouchView.swift */,
 				11112A4CFA44B2BBA9A1A562 /* AudioBarView.swift */,
 				BFAEDAE7F14A8D2618A09EB6 /* BookFileResolution.swift */,
-				C3C612E37CBDB8078E5ACA60 /* ClickableTextView.swift */,
 				291D8FBF8930897384E49916 /* ImportService.swift */,
 				85BF1DBC1D9E6524B3E21E68 /* InfoiOS.plist */,
 				E12A672259931B140AB3EF50 /* LibraryView.swift */,
@@ -126,7 +126,7 @@
 		DCE5B8321F60997BF943FC88 /* Products */ = {
 			isa = PBXGroup;
 			children = (
-				3F480532410A8E3B93C3C665 /* Palimpsest.app */,
+				3F480532410A8E3B93C3C665 /* PalimpsestiOS.app */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -151,7 +151,7 @@
 				6B9910A9D14C1F86F1DEA016 /* PalimpsestCore */,
 			);
 			productName = PalimpsestiOS;
-			productReference = 3F480532410A8E3B93C3C665 /* Palimpsest.app */;
+			productReference = 3F480532410A8E3B93C3C665 /* PalimpsestiOS.app */;
 			productType = "com.apple.product-type.application";
 		};
 /* End PBXNativeTarget section */
@@ -161,9 +161,10 @@
 			isa = PBXProject;
 			attributes = {
 				BuildIndependentTargetsInParallel = YES;
-				LastUpgradeCheck = 2640;
+				LastUpgradeCheck = 1430;
 				TargetAttributes = {
 					B055FD2DB6974F61A24884F8 = {
+						DevelopmentTeam = "";
 						ProvisioningStyle = Automatic;
 					};
 				};
@@ -212,8 +213,8 @@
 				7CFE5F9F44CE70FBF0516AE9 /* AudioBarTouchView.swift in Sources */,
 				A62B162326A787628026378F /* AudioBarView.swift in Sources */,
 				AA01B42854934E606FA5B0B8 /* BookFileResolution.swift in Sources */,
-				A688B2B836846FDC49DC1FAF /* ClickableTextView.swift in Sources */,
 				9734A0FCAA494EDCF1F9792B /* DogEarPageTurn.swift in Sources */,
+				1C1FEB52B0C40F4C4A51C29A /* HighlightableTextView.swift in Sources */,
 				4C0F906BDB6350F98B7BE82A /* ImportService.swift in Sources */,
 				CAEDA9A8EB611692E418531D /* LibraryView.swift in Sources */,
 				9A46A8E912D71E51F76126C5 /* OnboardingView.swift in Sources */,
@@ -291,7 +292,6 @@
 				ONLY_ACTIVE_ARCH = YES;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = iphoneos;
-				STRING_CATALOG_GENERATE_SYMBOLS = YES;
 				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
 				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
 				SWIFT_VERSION = 5.0;
@@ -307,7 +307,7 @@
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 2;
 				DERIVE_MACCATALYST_PRODUCT_BUNDLE_IDENTIFIER = NO;
-				DEVELOPMENT_TEAM = HA8444ZZH2;
+				DEVELOPMENT_TEAM = "";
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = App/InfoiOS.plist;
@@ -320,10 +320,8 @@
 				PRODUCT_BUNDLE_IDENTIFIER = com.rexhep.Palimpsest;
 				PRODUCT_NAME = Palimpsest;
 				SDKROOT = iphoneos;
-				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
 				SUPPORTS_MACCATALYST = YES;
 				SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD = NO;
-				SUPPORTS_XR_DESIGNED_FOR_IPHONE_IPAD = NO;
 				SWIFT_STRICT_CONCURRENCY = complete;
 				SWIFT_VERSION = 6.0;
 				TARGETED_DEVICE_FAMILY = "1,2";
@@ -383,7 +381,6 @@
 				MTL_FAST_MATH = YES;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = iphoneos;
-				STRING_CATALOG_GENERATE_SYMBOLS = YES;
 				SWIFT_COMPILATION_MODE = wholemodule;
 				SWIFT_OPTIMIZATION_LEVEL = "-O";
 				SWIFT_VERSION = 5.0;
@@ -399,7 +396,7 @@
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 2;
 				DERIVE_MACCATALYST_PRODUCT_BUNDLE_IDENTIFIER = NO;
-				DEVELOPMENT_TEAM = HA8444ZZH2;
+				DEVELOPMENT_TEAM = "";
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = App/InfoiOS.plist;
@@ -412,10 +409,8 @@
 				PRODUCT_BUNDLE_IDENTIFIER = com.rexhep.Palimpsest;
 				PRODUCT_NAME = Palimpsest;
 				SDKROOT = iphoneos;
-				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
 				SUPPORTS_MACCATALYST = YES;
 				SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD = NO;
-				SUPPORTS_XR_DESIGNED_FOR_IPHONE_IPAD = NO;
 				SWIFT_STRICT_CONCURRENCY = complete;
 				SWIFT_VERSION = 6.0;
 				TARGETED_DEVICE_FAMILY = "1,2";

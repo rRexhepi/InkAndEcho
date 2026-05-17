@@ -1,10 +1,26 @@
 import SwiftUI
+import PalimpsestCore
 
 #if canImport(AppKit)
 import AppKit
 #elseif canImport(UIKit)
 import UIKit
 #endif
+
+extension AnnotationColor {
+    /// Saturated swatch — the source of truth for every highlight surface
+    /// in the app. Render at `.opacity(0.30)` over text, `.opacity(0.22)`
+    /// over paragraph pills, or full opacity in swatches.
+    var swatch: Color {
+        switch self {
+        case .amber: return Color(red: 199/255, green: 151/255, blue: 63/255)
+        case .sage:  return Color(red: 155/255, green: 171/255, blue: 142/255)
+        case .rose:  return Color(red: 192/255, green: 149/255, blue: 147/255)
+        case .slate: return Color(red: 122/255, green: 135/255, blue: 148/255)
+        case .plum:  return Color(red: 155/255, green: 126/255, blue: 146/255)
+        }
+    }
+}
 
 enum Theme {
     static let canvas         = adaptive(light: (244, 239, 230), dark: ( 27,  24,  21))
@@ -19,10 +35,8 @@ enum Theme {
     static let hairlineStrong = adaptive(light: (191, 179, 154), dark: ( 75,  68,  58))
 
     static let accent         = adaptive(light: (139,  90,  43), dark: (201, 154, 106))
-    static let accentDeep     = adaptive(light: (110,  69,  32), dark: (164, 124,  80))
     static let onAccent       = adaptive(light: (251, 247, 238), dark: ( 27,  24,  21))
 
-    static let highlightSentence = adaptive(light: (199, 151,  63), dark: (217, 177, 134))
     static let highlightWordSoft = adaptive(light: (250, 239, 203), dark: ( 90,  75,  50))
 }
 

@@ -42,19 +42,21 @@ public struct EPUBImporter: EBookImporter {
 
         let opfDir = (opfPath as NSString).deletingLastPathComponent
 
-        // Authoritative chapter titles from the EPUB's TOC. EPUB 3 nav.xhtml
-        // takes precedence; fall back to EPUB 2 NCX if no nav exists.
-        var titlesByHref: [String: String] = [:]
+        // Authoritative chapter list from the EPUB's TOC. EPUB 3 nav.xhtml
+        // takes precedence; fall back to EPUB 2 NCX if nav is missing or empty.
+        // Stored as an ordered list (not deduped by href) so a single spine
+        // file referenced by N fragments yields N chapter splits below.
+        var tocEntries: [TOCEntry] = []
         if let navHref = opf.navHref {
             let navPath = resolvePath(navHref, relativeTo: opfDir)
             if let xhtml = try? extractText(from: archive, path: navPath) {
-                titlesByHref = parseNavTOC(xhtml: xhtml)
+                tocEntries = parseNavTOC(xhtml: xhtml)
             }
         }
-        if titlesByHref.isEmpty, let ncxHref = opf.ncxHref {
+        if tocEntries.isEmpty, let ncxHref = opf.ncxHref {
             let ncxPath = resolvePath(ncxHref, relativeTo: opfDir)
             if let xml = try? extractText(from: archive, path: ncxPath) {
-                titlesByHref = parseNCXTOC(xml: xml)
+                tocEntries = parseNCXTOC(xml: xml)
             }
         }
 
@@ -63,13 +65,13 @@ public struct EPUBImporter: EBookImporter {
             guard let item = opf.manifest[itemref] else { continue }
             let path = resolvePath(item.href, relativeTo: opfDir)
             let xhtml = (try? extractText(from: archive, path: path)) ?? ""
-            let plain = stripHTML(xhtml)
-            guard !plain.isEmpty else { continue }
-
-            // Title preference: TOC entry, then h1/h2/h3, then <title>.
-            let hrefKey = (item.href.components(separatedBy: "#").first ?? item.href)
-            let title = titlesByHref[hrefKey] ?? extractChapterTitle(from: xhtml)
-            segments.append(TextSegment(id: itemref, title: title, text: plain))
+            appendSpineSegments(
+                into: &segments,
+                itemref: itemref,
+                itemHref: item.href,
+                xhtml: xhtml,
+                tocEntries: tocEntries
+            )
         }
 
         let cover: Data? = {
@@ -277,20 +279,43 @@ private func localName(of qualified: String) -> String {
 
 // MARK: - TOC parsing
 
-/// Walk an EPUB 3 nav.xhtml file and return a map from chapter href (without
-/// fragment) to the human-readable chapter title.
-private func parseNavTOC(xhtml: String) -> [String: String] {
-    guard let data = xhtml.data(using: .utf8) else { return [:] }
+private struct TOCEntry {
+    let href: String
+    let fragment: String?
+    let title: String
+}
+
+private func splitHref(_ raw: String) -> (href: String, fragment: String?) {
+    guard let hashIdx = raw.firstIndex(of: "#") else { return (raw, nil) }
+    let href = String(raw[..<hashIdx])
+    let after = raw.index(after: hashIdx)
+    let fragment = after < raw.endIndex ? String(raw[after...]) : nil
+    return (href, fragment)
+}
+
+/// EPUB 3 `<nav epub:type="toc">` — every anchor becomes a TOC entry in
+/// document order. Fragments preserved so callers can split a spine file
+/// at anchor offsets.
+private func parseNavTOC(xhtml: String) -> [TOCEntry] {
+    guard let data = xhtml.data(using: .utf8) else { return [] }
     let parser = XMLParser(data: data)
     let delegate = NavTOCDelegate()
     parser.delegate = delegate
     _ = parser.parse()
-    return delegate.titlesByHref
+    return delegate.entries
 }
 
 private final class NavTOCDelegate: NSObject, XMLParserDelegate {
-    var titlesByHref: [String: String] = [:]
-    private var insideTOCNav = false
+    /// Final output: prefers explicit toc-tagged nav, falls back to the
+    /// first top-level nav when nothing is tagged. Matches Dart's
+    /// `tocNav ?? firstNav` pick.
+    var entries: [TOCEntry] { tocEntries.isEmpty ? firstNavEntries : tocEntries }
+
+    private var tocEntries: [TOCEntry] = []
+    private var firstNavEntries: [TOCEntry] = []
+    private var inToc = false
+    private var inFirstNav = false
+    private var sawFirstNav = false
     private var navDepth = 0
     private var currentHref: String?
     private var currentText: String = ""
@@ -299,56 +324,61 @@ private final class NavTOCDelegate: NSObject, XMLParserDelegate {
         let local = localName(of: elementName)
         if local == "nav" {
             navDepth += 1
-            // EPUB 3: <nav epub:type="toc">. Some authors omit the prefix.
-            let type = attrs["epub:type"] ?? attrs["type"] ?? attrs["role"] ?? ""
-            if type.contains("toc") {
-                insideTOCNav = true
-            } else if !insideTOCNav && navDepth == 1 {
-                // No declared type — treat the first nav as the TOC.
-                insideTOCNav = true
+            if navDepth == 1 {
+                let type = attrs["epub:type"] ?? attrs["type"] ?? attrs["role"] ?? ""
+                if type.contains("toc") {
+                    inToc = true
+                } else if !sawFirstNav {
+                    inFirstNav = true
+                }
+                sawFirstNav = true
             }
-        } else if insideTOCNav && local == "a" {
+        } else if (inToc || inFirstNav) && local == "a" {
             currentHref = attrs["href"]
             currentText = ""
         }
     }
 
     func parser(_ parser: XMLParser, foundCharacters string: String) {
-        if insideTOCNav && currentHref != nil {
+        if (inToc || inFirstNav) && currentHref != nil {
             currentText += string
         }
     }
 
     func parser(_ parser: XMLParser, didEndElement elementName: String, namespaceURI: String?, qualifiedName qName: String?) {
         let local = localName(of: elementName)
-        if local == "a", insideTOCNav, let href = currentHref {
-            let key = href.components(separatedBy: "#").first ?? href
+        if local == "a", inToc || inFirstNav, let href = currentHref {
             let title = currentText.trimmingCharacters(in: .whitespacesAndNewlines)
-            if !title.isEmpty && titlesByHref[key] == nil {
-                titlesByHref[key] = title
+            if !title.isEmpty {
+                let parts = splitHref(href)
+                let entry = TOCEntry(href: parts.href, fragment: parts.fragment, title: title)
+                if inToc { tocEntries.append(entry) }
+                else { firstNavEntries.append(entry) }
             }
             currentHref = nil
             currentText = ""
         } else if local == "nav" {
             navDepth -= 1
-            if navDepth == 0 { insideTOCNav = false }
+            if navDepth == 0 {
+                inToc = false
+                inFirstNav = false
+            }
         }
     }
 }
 
-/// Walk an EPUB 2 NCX file and return a map from chapter href (without
-/// fragment) to the human-readable chapter title.
-private func parseNCXTOC(xml: String) -> [String: String] {
-    guard let data = xml.data(using: .utf8) else { return [:] }
+/// EPUB 2 NCX — `navPoint`s in document order with fragments preserved.
+private func parseNCXTOC(xml: String) -> [TOCEntry] {
+    guard let data = xml.data(using: .utf8) else { return [] }
     let parser = XMLParser(data: data)
     let delegate = NCXTOCDelegate()
     parser.delegate = delegate
     _ = parser.parse()
-    return delegate.titlesByHref
+    return delegate.entries
 }
 
 private final class NCXTOCDelegate: NSObject, XMLParserDelegate {
-    var titlesByHref: [String: String] = [:]
+    var entries: [TOCEntry] = []
 
     private struct NavPointCtx {
         var src: String?
@@ -397,14 +427,141 @@ private final class NCXTOCDelegate: NSObject, XMLParserDelegate {
             insideNavLabel = false
         case "navPoint":
             guard let ctx = stack.popLast(), let src = ctx.src, !ctx.title.isEmpty else { return }
-            let key = src.components(separatedBy: "#").first ?? src
-            if titlesByHref[key] == nil {
-                titlesByHref[key] = ctx.title
-            }
+            let parts = splitHref(src)
+            entries.append(TOCEntry(href: parts.href, fragment: parts.fragment, title: ctx.title))
         default:
             break
         }
     }
+}
+
+// MARK: - Spine splitting
+
+/// Pre-first-anchor content shorter than this is usually running-header
+/// re-runs, not real preamble. Matches the Dart importer threshold.
+private let preambleMinChars = 150
+
+private let navLabelRegex = try? NSRegularExpression(
+    pattern: #"^\s*(prev(ious)?|next|up|back|home|top|continue|menu|index|table\s+of\s+contents)\s*$"#,
+    options: .caseInsensitive
+)
+
+private let chapterishPrefixes = [
+    "chapter", "part", "book", "volume", "prologue", "epilogue",
+    "preface", "foreword", "introduction", "afterword", "dedication",
+]
+
+private func looksLikeNavLabel(_ title: String) -> Bool {
+    guard let re = navLabelRegex else { return false }
+    let range = NSRange(title.startIndex..<title.endIndex, in: title)
+    return re.firstMatch(in: title, range: range) != nil
+}
+
+private func looksLikeChapterTitle(_ title: String) -> Bool {
+    let t = title.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    if t.isEmpty { return false }
+    if t.contains("appendix") { return true }
+    return chapterishPrefixes.contains { t.hasPrefix($0) }
+}
+
+/// Locate the character offset of the tag whose `id` matches `fragment`. The
+/// offset points at the opening `<` of that tag so the resulting split
+/// captures the heading itself, not just its tail.
+private func findAnchorOffset(in xhtml: String, fragment: String) -> Int? {
+    let escaped = NSRegularExpression.escapedPattern(for: fragment)
+    let pattern = #"\bid=["']"# + escaped + #"["']"#
+    guard let re = try? NSRegularExpression(pattern: pattern) else { return nil }
+    let nsXhtml = xhtml as NSString
+    let range = NSRange(location: 0, length: nsXhtml.length)
+    guard let match = re.firstMatch(in: xhtml, range: range) else { return nil }
+    let matchStart = match.range.location
+    let searchRange = NSRange(location: 0, length: matchStart)
+    let tagStart = nsXhtml.range(of: "<", options: .backwards, range: searchRange)
+    return tagStart.location == NSNotFound ? 0 : tagStart.location
+}
+
+private struct Split {
+    let entry: TOCEntry
+    let offset: Int
+}
+
+private func collectSplits(itemHref: String, xhtml: String, tocEntries: [TOCEntry]) -> [Split] {
+    let hrefKey = splitHref(itemHref).href
+    var seen: Set<Int> = []
+    var splits: [Split] = []
+    for entry in tocEntries {
+        let hrefMatches = entry.href == hrefKey
+        let offset: Int?
+        if let frag = entry.fragment {
+            offset = findAnchorOffset(in: xhtml, fragment: frag)
+        } else {
+            offset = hrefMatches ? 0 : nil
+        }
+        guard let off = offset else { continue }
+        // Skip nav-chrome anchors (Prev / Next / Up etc.) on files where
+        // the TOC doesn't otherwise reference this spine item directly.
+        if !hrefMatches, !looksLikeChapterTitle(entry.title), looksLikeNavLabel(entry.title) {
+            continue
+        }
+        if !seen.insert(off).inserted { continue }
+        splits.append(Split(entry: entry, offset: off))
+    }
+    splits.sort { $0.offset < $1.offset }
+    return splits
+}
+
+private func appendSpineSegments(
+    into segments: inout [TextSegment],
+    itemref: String,
+    itemHref: String,
+    xhtml: String,
+    tocEntries: [TOCEntry]
+) {
+    let splits = collectSplits(itemHref: itemHref, xhtml: xhtml, tocEntries: tocEntries)
+    if splits.isEmpty {
+        let plain = stripHTML(xhtml)
+        guard !plain.isEmpty else { return }
+        let hrefKey = splitHref(itemHref).href
+        let title = tocEntries.first(where: { $0.href == hrefKey && $0.fragment == nil })?.title
+            ?? extractChapterTitle(from: xhtml)
+        segments.append(TextSegment(id: itemref, title: title, text: plain))
+        return
+    }
+
+    appendPreamble(into: &segments, itemref: itemref, xhtml: xhtml, firstSplitOffset: splits[0].offset)
+
+    let nsXhtml = xhtml as NSString
+    for i in 0..<splits.count {
+        let start = splits[i].offset
+        let end = i + 1 < splits.count ? splits[i + 1].offset : nsXhtml.length
+        let slice = nsXhtml.substring(with: NSRange(location: start, length: end - start))
+        let plain = stripHTML(slice)
+        guard !plain.isEmpty else { continue }
+        let fragKey = splits[i].entry.fragment ?? "\(i)"
+        segments.append(TextSegment(
+            id: "\(itemref)_\(fragKey)",
+            title: splits[i].entry.title,
+            text: plain
+        ))
+    }
+}
+
+private func appendPreamble(
+    into segments: inout [TextSegment],
+    itemref: String,
+    xhtml: String,
+    firstSplitOffset: Int
+) {
+    guard firstSplitOffset > 0 else { return }
+    let nsXhtml = xhtml as NSString
+    let preambleXhtml = nsXhtml.substring(with: NSRange(location: 0, length: firstSplitOffset))
+    let preamble = stripHTML(preambleXhtml)
+    guard preamble.count >= preambleMinChars else { return }
+    segments.append(TextSegment(
+        id: "\(itemref)_preamble",
+        title: extractChapterTitle(from: preambleXhtml),
+        text: preamble
+    ))
 }
 
 // MARK: - Chapter title extraction
