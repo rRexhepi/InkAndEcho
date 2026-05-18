@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:ui';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter_foreground_task/flutter_foreground_task.dart';
@@ -12,6 +13,9 @@ import 'alignment_service.dart';
 /// because plain MethodChannel arguments aren't bridged into onStart.
 @pragma('vm:entry-point')
 void startTranscriptionTaskHandler() {
+  // Re-register plugin instances for this service isolate; path_provider
+  // and friends won't resolve their MethodChannels without it.
+  DartPluginRegistrant.ensureInitialized();
   FlutterForegroundTask.setTaskHandler(_TranscriptionTaskHandler());
 }
 

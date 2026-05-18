@@ -7,6 +7,9 @@
     <!-- Pairs with the dataSync foregroundServiceType on the
          transcription service declared below. -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC"/>
+    <!-- Android 13+ requires runtime grant before a foreground service
+         can show its mandatory notification. -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
     <application
         android:label="Palimpsest"
         android:name="${applicationName}"

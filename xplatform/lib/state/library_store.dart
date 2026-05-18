@@ -335,6 +335,18 @@ class LibraryStore extends ChangeNotifier {
     FlutterForegroundTask.addTaskDataCallback(callback);
     try {
       await _ensureForegroundServiceInitialized();
+      final permission =
+          await FlutterForegroundTask.checkNotificationPermission();
+      if (permission != NotificationPermission.granted) {
+        final granted =
+            await FlutterForegroundTask.requestNotificationPermission();
+        if (granted != NotificationPermission.granted) {
+          // Without notification grant the OS rejects the service silently;
+          // fall back to inline so the user still gets their transcript.
+          await _runAlignmentInline(book, job);
+          return;
+        }
+      }
       // MethodChannel args don't reach TaskHandler.onStart; round-trip
       // the book id via the plugin's prefs store instead.
       await FlutterForegroundTask.saveData(key: 'bookId', value: book.id);
@@ -345,10 +357,14 @@ class LibraryStore extends ChangeNotifier {
         callback: startTranscriptionTaskHandler,
       );
       if (result is ServiceRequestFailure) {
-        throw StateError(
-            'Foreground service refused to start: ${result.error}');
+        debugPrint('foreground service start failed: ${result.error}');
+        await _runAlignmentInline(book, job);
+        return;
       }
       await completer.future;
+    } catch (e, st) {
+      debugPrint('foreground service path threw, falling back inline: $e\n$st');
+      await _runAlignmentInline(book, job);
     } finally {
       FlutterForegroundTask.removeTaskDataCallback(callback);
       if (await FlutterForegroundTask.isRunningService) {

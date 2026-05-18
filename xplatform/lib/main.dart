@@ -1,6 +1,7 @@
 import 'dart:io' show Platform;
 
 import 'package:flutter/material.dart';
+import 'package:flutter_foreground_task/flutter_foreground_task.dart';
 import 'package:just_audio_background/just_audio_background.dart';
 import 'package:just_audio_media_kit/just_audio_media_kit.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -34,6 +35,12 @@ Future<void> main() async {
   } else {
     // Windows / Linux / macOS — route just_audio through libmpv.
     JustAudioMediaKit.ensureInitialized();
+  }
+  if (Platform.isAndroid) {
+    // Bridges the transcription service isolate's sendDataToMain calls
+    // to the main isolate's task-data callbacks. Without it, progress
+    // events get dropped and the UI never advances past "Preparing…".
+    FlutterForegroundTask.initCommunicationPort();
   }
   runApp(const PalimpsestApp());
 }
