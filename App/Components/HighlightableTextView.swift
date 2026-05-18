@@ -47,6 +47,29 @@ struct HighlightableTextView: UIViewRepresentable {
         private var startWord: Int?
         private var visited: Set<Int> = []
         private var inDragSession = false
+        private var lastLaidOutWidth: CGFloat = 0
+
+        /// SwiftUI hands us a layout width via `bounds`; pin the text
+        /// container to it and recompute intrinsic height from there.
+        /// Without this, UITextView (isScrollEnabled = false) reports
+        /// the unbounded line width as its intrinsic content size and
+        /// SwiftUI lays a whole paragraph out on one line.
+        override func layoutSubviews() {
+            super.layoutSubviews()
+            let w = bounds.width
+            if w > 0, abs(w - lastLaidOutWidth) > 0.5 {
+                lastLaidOutWidth = w
+                textContainer.size = CGSize(width: w, height: .greatestFiniteMagnitude)
+                invalidateIntrinsicContentSize()
+            }
+        }
+
+        override var intrinsicContentSize: CGSize {
+            let w = lastLaidOutWidth > 0 ? lastLaidOutWidth : bounds.width
+            guard w > 0 else { return super.intrinsicContentSize }
+            let size = sizeThatFits(CGSize(width: w, height: .greatestFiniteMagnitude))
+            return CGSize(width: UIView.noIntrinsicMetric, height: ceil(size.height))
+        }
 
         func applyAttributedString(_ s: AttributedString) {
             let ns = NSMutableAttributedString(attributedString: NSAttributedString(s))
