@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io';
 import 'dart:isolate';
 import 'dart:typed_data';
 
@@ -257,12 +258,19 @@ void _entry(_WorkerInit init) {
     task: 'transcribe',
     enableTokenTimestamps: true,
   );
+  // XNNPACK is the same numerical precision as the default CPU EP
+  // (no NNAPI-style int8 drift) but its hand-tuned NEON kernels give
+  // ~30-50% faster matmul on ARM. Keep desktop on the stock CPU EP
+  // where ORT's MKL/oneDNN path is already well-optimized.
+  final provider = init.useNNAPI
+      ? 'nnapi'
+      : (Platform.isAndroid ? 'xnnpack' : 'cpu');
   final modelConfig = so.OfflineModelConfig(
     whisper: whisper,
     tokens: init.tokensPath,
     modelType: 'whisper',
     numThreads: init.numThreads,
-    provider: init.useNNAPI ? 'nnapi' : 'cpu',
+    provider: provider,
   );
   final config = so.OfflineRecognizerConfig(model: modelConfig);
   final recognizer = so.OfflineRecognizer(config);
