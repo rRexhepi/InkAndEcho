@@ -46,7 +46,6 @@ public final class AudioEngine {
 
     private var seekOffsetSeconds: TimeInterval = 0
     private var baselineSampleTime: AVAudioFramePosition = 0
-    private var baselineRate: Float = 1.0
 
     private var displayTimer: Timer?
 
@@ -93,7 +92,6 @@ public final class AudioEngine {
             currentTime = 0
             seekOffsetSeconds = 0
             baselineSampleTime = 0
-            baselineRate = rate
             scheduleFromStart()
             state = .ready
         } catch {
@@ -134,7 +132,6 @@ public final class AudioEngine {
         player.stop()
         seekOffsetSeconds = clamped
         baselineSampleTime = 0
-        baselineRate = rate
         currentTime = clamped
 
         guard frameCount > 0 else {
@@ -158,7 +155,6 @@ public final class AudioEngine {
         snapshotPosition()
         rate = clamped
         timePitch.rate = clamped
-        baselineRate = clamped
     }
 
     private func scheduleFromStart() {
@@ -174,8 +170,13 @@ public final class AudioEngine {
         guard let nodeTime = player.lastRenderTime,
               let playerTime = player.playerTime(forNodeTime: nodeTime),
               playerTime.sampleRate > 0 else { return }
+        // `playerTime.sampleTime` advances at the rate the engine pulls
+        // from the player — already source-rate, so `elapsed` is in
+        // source seconds. Don't multiply by the playback rate (it's the
+        // same `rate` time-pitch is using to pull faster); doing so
+        // double-counts and makes the scrubber climb at ~rate² wall-clock.
         let elapsed = Double(playerTime.sampleTime - baselineSampleTime) / playerTime.sampleRate
-        seekOffsetSeconds = min(duration, seekOffsetSeconds + elapsed * Double(baselineRate))
+        seekOffsetSeconds = min(duration, seekOffsetSeconds + elapsed)
         baselineSampleTime = playerTime.sampleTime
     }
 
@@ -209,7 +210,7 @@ public final class AudioEngine {
               let playerTime = player.playerTime(forNodeTime: nodeTime),
               playerTime.sampleRate > 0 else { return }
         let elapsed = Double(playerTime.sampleTime - baselineSampleTime) / playerTime.sampleRate
-        currentTime = min(duration, seekOffsetSeconds + elapsed * Double(baselineRate))
+        currentTime = min(duration, seekOffsetSeconds + elapsed)
     }
 }
 
