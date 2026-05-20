@@ -43,7 +43,6 @@ struct ReaderView: View {
     @State var annotationRevision: Int = 0
 
     @AppStorage("inkandecho.paginated") var paginated: Bool = true
-    @AppStorage("inkandecho.wordHighlighting") var wordHighlightingEnabled: Bool = false
     @AppStorage(AppSettings.animationsEnabledKey) var animationsEnabled: Bool = true
     @State var currentPageIndex: Int = 0
     @State var lastTurnedForward: Bool = true
@@ -80,12 +79,6 @@ struct ReaderView: View {
     @Environment(\.dismiss) var iosDismiss
     #endif
 
-    /// Stored on an `@Observable` class so writes invalidate only the views
-    /// that actually read `current` (the visible `ParagraphRow`s) — not
-    /// `ReaderView.body`, which would otherwise rebuild the entire reader
-    /// (PVC, audio bar, scroll view) on every word change during aligned
-    /// audio playback.
-    @State var activeWordTracker = ActiveWordTracker()
     @State var lastProgressSaveAt: Date?
 
     /// Pre-filtered + pre-sorted anchors per segment. Built once when the
@@ -118,12 +111,10 @@ struct ReaderView: View {
             // the entire reader (breaking SwiftUI Menu state + gestures
             // during playback).
             AudioTimeWatcher(engine: engine) {
-                refreshActiveWord()
                 saveProgressIfNeeded()
             }
         }
         .onChange(of: selectedSegmentID) { _, _ in
-            refreshActiveWord()
             saveProgressIfNeeded(force: true)
         }
         .onChange(of: currentPageIndex) { _, _ in
@@ -1232,9 +1223,6 @@ struct ReaderView: View {
             paragraphIndex: paragraphIndex,
             wordOffset: wordOffset,
             seekEnabled: alignmentMap != nil,
-            segmentID: segmentID,
-            activeWordTracker: activeWordTracker,
-            highlightMode: (wordHighlightingEnabled && abs(engine.rate - 1.0) < 0.01) ? .word : .none,
             annotations: annotations(forSegment: segmentID, paragraph: paragraphIndex),
             onPlayFromWord: { localWordIdx in
                 seekToWord(segmentID: segmentID, wordOffset: wordOffset, localIndex: localWordIdx)
@@ -1352,103 +1340,6 @@ struct ReaderView: View {
 
     func tokenizeWords(_ text: String) -> [String] {
         text.components(separatedBy: .whitespacesAndNewlines).filter { !$0.isEmpty }
-    }
-
-    func refreshActiveWord() {
-        guard let map = alignmentMap, let segment = currentSegment else {
-            if activeWordTracker.current != nil { activeWordTracker.current = nil }
-            return
-        }
-        guard let segAnchorsByStart = anchorsBySegment[segment.id], !segAnchorsByStart.isEmpty else {
-            if activeWordTracker.current != nil { activeWordTracker.current = nil }
-            return
-        }
-
-        // Compensate for audio output latency. Engine.currentTime tracks the
-        // latest rendered sample, but the user hears it ~latency seconds later
-        // in wall-clock; in source-time that gap scales with playback rate.
-        let latencyOffset = engine.outputLatency * Double(engine.rate)
-        let t = max(0, engine.currentTime - latencyOffset)
-
-        // Prefer audio-word-index projection (natural narrator pacing). Falls
-        // back to time interpolation when an old alignment.json doesn't have
-        // audioWordStarts populated.
-        let segAnchorsByAudio = anchorsBySegmentAudioIdx[segment.id] ?? []
-        let useAudioIndexPath = !map.audioWordStarts.isEmpty && !segAnchorsByAudio.isEmpty
-
-        let estimatedBookWordIndex: Int?
-        let chosenAudioIndex: Int
-
-        if useAudioIndexPath {
-            let audioIdx = audioWordIndex(forTime: t, in: map.audioWordStarts)
-            chosenAudioIndex = audioIdx
-
-            var preceding: WordAnchor?
-            var following: WordAnchor?
-            for anchor in segAnchorsByAudio {
-                if anchor.audioIndex <= audioIdx { preceding = anchor }
-                else { following = anchor; break }
-            }
-            if let p = preceding, let f = following, f.audioIndex > p.audioIndex {
-                let frac = Double(audioIdx - p.audioIndex) / Double(f.audioIndex - p.audioIndex)
-                let bookSpan = Double(f.wordIndex - p.wordIndex)
-                estimatedBookWordIndex = p.wordIndex + Int((bookSpan * frac).rounded())
-            } else if let p = preceding {
-                estimatedBookWordIndex = p.wordIndex
-            } else {
-                estimatedBookWordIndex = nil
-            }
-        } else {
-            chosenAudioIndex = -1
-            var preceding: WordAnchor?
-            var following: WordAnchor?
-            for anchor in segAnchorsByStart {
-                if anchor.startSeconds <= t { preceding = anchor }
-                else { following = anchor; break }
-            }
-            if let p = preceding, let f = following, f.startSeconds > p.startSeconds {
-                let frac = (t - p.startSeconds) / (f.startSeconds - p.startSeconds)
-                let bookSpan = Double(f.wordIndex - p.wordIndex)
-                estimatedBookWordIndex = p.wordIndex + Int((bookSpan * frac).rounded())
-            } else if let p = preceding {
-                estimatedBookWordIndex = p.wordIndex
-            } else {
-                estimatedBookWordIndex = nil
-            }
-        }
-
-        let synthesized = estimatedBookWordIndex.map {
-            WordAnchor(
-                segmentId: segment.id,
-                wordIndex: $0,
-                startSeconds: t,
-                endSeconds: t + 0.25,
-                audioIndex: chosenAudioIndex,
-                confidence: 0.5
-            )
-        }
-        if synthesized?.wordIndex != activeWordTracker.current?.wordIndex || synthesized?.segmentId != activeWordTracker.current?.segmentId {
-            activeWordTracker.current = synthesized
-        }
-    }
-
-    /// Binary-search for the audio-word index whose start time is the latest
-    /// at or before `t`. Returns 0 if `t` is before everything.
-    func audioWordIndex(forTime t: TimeInterval, in starts: [Double]) -> Int {
-        guard !starts.isEmpty else { return 0 }
-        var lo = 0
-        var hi = starts.count - 1
-        var best = 0
-        while lo <= hi {
-            let mid = (lo + hi) / 2
-            if starts[mid] <= t {
-                best = mid
-                lo = mid + 1
-            } else {
-                hi = mid - 1
-            }
-        }
-        return best
     }
 
     /// Page-break the chapter into chunks that each fit visually on one
@@ -2046,15 +1937,6 @@ private struct AudioTimeWatcher: View {
     var body: some View {
         Color.clear.onChange(of: engine.currentTime) { _, _ in onTick() }
     }
-}
-
-/// Holds the currently-narrated word for aligned audio. Class so
-/// `@Observable` invalidates only views that read `current` (visible
-/// `ParagraphRow`s) — `ReaderView.body` doesn't touch it, so the rest of
-/// the reader stays stable across word-level updates during playback.
-@Observable
-final class ActiveWordTracker {
-    var current: WordAnchor?
 }
 
 struct ParagraphAnchor: Identifiable, Equatable {
