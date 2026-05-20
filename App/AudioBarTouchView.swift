@@ -165,31 +165,49 @@ struct AudioBarTouchView: View {
     }
 }
 
-/// Isolated so the 10 Hz `engine.currentTime` ticks only invalidate this
-/// view, not the whole audio bar (rate menu / play button stay stable).
+/// Reads `engine.currentTime` off a 3 Hz timer into local `@State` instead
+/// of directly in body, so the audio bar doesn't re-render at the engine's
+/// 10 Hz tick rate (CoreAnimation fought with ScrollView scrolling and
+/// PVC gesture handling during playback).
 private struct ScrubberRow: View {
     let engine: AudioEngine
+    @State private var displayTime: TimeInterval = 0
+    @State private var displayDuration: TimeInterval = 0.001
+
+    private static let tickInterval: TimeInterval = 1.0 / 3.0
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             Slider(
                 value: Binding(
-                    get: { min(engine.currentTime, max(engine.duration, 0.001)) },
-                    set: { engine.seek(to: $0) }
+                    get: { min(displayTime, displayDuration) },
+                    set: { newValue in
+                        engine.seek(to: newValue)
+                        displayTime = newValue
+                    }
                 ),
-                in: 0...max(engine.duration, 0.001)
+                in: 0...displayDuration
             )
             .tint(Theme.accent)
-            .disabled(engine.duration <= 0)
+            .disabled(displayDuration <= 0.001)
             HStack {
-                Text(formatTime(engine.currentTime))
+                Text(formatTime(displayTime))
                 Spacer()
-                Text(formatTime(engine.duration))
+                Text(formatTime(displayDuration))
             }
             .font(.system(size: 11, design: .monospaced))
             .foregroundStyle(Theme.inkMuted)
             .monospacedDigit()
         }
+        .onAppear { syncFromEngine() }
+        .onReceive(Timer.publish(every: Self.tickInterval, on: .main, in: .common).autoconnect()) { _ in
+            syncFromEngine()
+        }
+    }
+
+    private func syncFromEngine() {
+        displayTime = engine.currentTime
+        displayDuration = max(engine.duration, 0.001)
     }
 
     private func formatTime(_ seconds: TimeInterval) -> String {
