@@ -53,33 +53,9 @@ struct AudioBarTouchView: View {
                         Spacer(minLength: 0)
                     }
                 }
-                scrubber
-                timeRow
+                ScrubberRow(engine: engine)
             }
         }
-    }
-
-    private var scrubber: some View {
-        Slider(
-            value: Binding(
-                get: { min(engine.currentTime, max(engine.duration, 0.001)) },
-                set: { engine.seek(to: $0) }
-            ),
-            in: 0...max(engine.duration, 0.001)
-        )
-        .tint(Theme.accent)
-        .disabled(engine.duration <= 0)
-    }
-
-    private var timeRow: some View {
-        HStack {
-            Text(formatTime(engine.currentTime))
-            Spacer()
-            Text(formatTime(engine.duration))
-        }
-        .font(.system(size: 11, design: .monospaced))
-        .foregroundStyle(Theme.inkMuted)
-        .monospacedDigit()
     }
 
     private var pillRow: some View {
@@ -184,6 +160,38 @@ struct AudioBarTouchView: View {
         .clipShape(Capsule())
     }
 
+    private func formatRate(_ rate: Float) -> String {
+        rate == floor(rate) ? "\(Int(rate))×" : String(format: "%.2g×", rate)
+    }
+}
+
+/// Isolated so the 10 Hz `engine.currentTime` ticks only invalidate this
+/// view, not the whole audio bar (rate menu / play button stay stable).
+private struct ScrubberRow: View {
+    let engine: AudioEngine
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Slider(
+                value: Binding(
+                    get: { min(engine.currentTime, max(engine.duration, 0.001)) },
+                    set: { engine.seek(to: $0) }
+                ),
+                in: 0...max(engine.duration, 0.001)
+            )
+            .tint(Theme.accent)
+            .disabled(engine.duration <= 0)
+            HStack {
+                Text(formatTime(engine.currentTime))
+                Spacer()
+                Text(formatTime(engine.duration))
+            }
+            .font(.system(size: 11, design: .monospaced))
+            .foregroundStyle(Theme.inkMuted)
+            .monospacedDigit()
+        }
+    }
+
     private func formatTime(_ seconds: TimeInterval) -> String {
         let total = max(0, Int(seconds))
         let h = total / 3600
@@ -192,10 +200,6 @@ struct AudioBarTouchView: View {
         return h > 0
             ? String(format: "%d:%02d:%02d", h, m, s)
             : String(format: "%d:%02d", m, s)
-    }
-
-    private func formatRate(_ rate: Float) -> String {
-        rate == floor(rate) ? "\(Int(rate))×" : String(format: "%.2g×", rate)
     }
 }
 #endif
