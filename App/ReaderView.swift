@@ -106,9 +106,16 @@ struct ReaderView: View {
         readerLayout
             .background(Theme.canvas)
             .navigationTitle(book.title)
-        .onChange(of: engine.currentTime) { _, _ in
-            refreshActiveWord()
-            saveProgressIfNeeded()
+        .background {
+            // Engine ticks `currentTime` at 10 Hz; isolating the read
+            // here keeps it out of `ReaderView.body`, which would
+            // otherwise become a dependent of `currentTime` and re-eval
+            // the entire reader (breaking SwiftUI Menu state + gestures
+            // during playback).
+            AudioTimeWatcher(engine: engine) {
+                refreshActiveWord()
+                saveProgressIfNeeded()
+            }
         }
         .onChange(of: selectedSegmentID) { _, _ in
             refreshActiveWord()
@@ -2030,6 +2037,15 @@ enum SidebarTab: String, CaseIterable {
     case chapters
     case bookmarks
     case notes
+}
+
+private struct AudioTimeWatcher: View {
+    let engine: AudioEngine
+    let onTick: () -> Void
+
+    var body: some View {
+        Color.clear.onChange(of: engine.currentTime) { _, _ in onTick() }
+    }
 }
 
 struct ParagraphAnchor: Identifiable, Equatable {

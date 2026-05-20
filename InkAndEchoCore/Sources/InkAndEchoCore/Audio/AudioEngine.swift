@@ -53,6 +53,9 @@ public final class AudioEngine {
     public init() {
         engine.attach(player)
         engine.attach(timePitch)
+        // Max overlap: cleaner time-stretch at 1.5×/2× narration. CPU
+        // cost is negligible on every iOS device that ships this app.
+        timePitch.overlap = 32
         engine.connect(player, to: timePitch, format: nil)
         engine.connect(timePitch, to: engine.mainMixerNode, format: nil)
         Self.configureAudioSessionIfNeeded()
