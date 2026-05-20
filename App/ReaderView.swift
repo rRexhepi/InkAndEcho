@@ -80,7 +80,12 @@ struct ReaderView: View {
     @Environment(\.dismiss) var iosDismiss
     #endif
 
-    @State var activeWord: WordAnchor?
+    /// Stored on an `@Observable` class so writes invalidate only the views
+    /// that actually read `current` (the visible `ParagraphRow`s) — not
+    /// `ReaderView.body`, which would otherwise rebuild the entire reader
+    /// (PVC, audio bar, scroll view) on every word change during aligned
+    /// audio playback.
+    @State var activeWordTracker = ActiveWordTracker()
     @State var lastProgressSaveAt: Date?
 
     /// Pre-filtered + pre-sorted anchors per segment. Built once when the
@@ -1221,19 +1226,14 @@ struct ReaderView: View {
         // For split paragraphs the displayed text is a chunk; word indices
         // need to count from the chunk's start, not the paragraph's.
         let wordOffset = paragraphWordOffset + chunkWordOffset
-        let activeLocalWord: Int? = {
-            guard let aw = activeWord, aw.segmentId == segmentID else { return nil }
-            let local = aw.wordIndex - wordOffset
-            let count = tokenizeWords(text).count
-            return (local >= 0 && local < count) ? local : nil
-        }()
 
         ParagraphRow(
             text: text,
             paragraphIndex: paragraphIndex,
             wordOffset: wordOffset,
             seekEnabled: alignmentMap != nil,
-            activeLocalWordIndex: activeLocalWord,
+            segmentID: segmentID,
+            activeWordTracker: activeWordTracker,
             highlightMode: (wordHighlightingEnabled && abs(engine.rate - 1.0) < 0.01) ? .word : .none,
             annotations: annotations(forSegment: segmentID, paragraph: paragraphIndex),
             onPlayFromWord: { localWordIdx in
@@ -1356,11 +1356,11 @@ struct ReaderView: View {
 
     func refreshActiveWord() {
         guard let map = alignmentMap, let segment = currentSegment else {
-            if activeWord != nil { activeWord = nil }
+            if activeWordTracker.current != nil { activeWordTracker.current = nil }
             return
         }
         guard let segAnchorsByStart = anchorsBySegment[segment.id], !segAnchorsByStart.isEmpty else {
-            if activeWord != nil { activeWord = nil }
+            if activeWordTracker.current != nil { activeWordTracker.current = nil }
             return
         }
 
@@ -1427,8 +1427,8 @@ struct ReaderView: View {
                 confidence: 0.5
             )
         }
-        if synthesized?.wordIndex != activeWord?.wordIndex || synthesized?.segmentId != activeWord?.segmentId {
-            activeWord = synthesized
+        if synthesized?.wordIndex != activeWordTracker.current?.wordIndex || synthesized?.segmentId != activeWordTracker.current?.segmentId {
+            activeWordTracker.current = synthesized
         }
     }
 
@@ -2046,6 +2046,15 @@ private struct AudioTimeWatcher: View {
     var body: some View {
         Color.clear.onChange(of: engine.currentTime) { _, _ in onTick() }
     }
+}
+
+/// Holds the currently-narrated word for aligned audio. Class so
+/// `@Observable` invalidates only views that read `current` (visible
+/// `ParagraphRow`s) — `ReaderView.body` doesn't touch it, so the rest of
+/// the reader stays stable across word-level updates during playback.
+@Observable
+final class ActiveWordTracker {
+    var current: WordAnchor?
 }
 
 struct ParagraphAnchor: Identifiable, Equatable {

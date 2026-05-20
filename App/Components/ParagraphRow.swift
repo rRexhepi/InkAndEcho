@@ -24,7 +24,11 @@ struct ParagraphRow: View {
     let paragraphIndex: Int
     let wordOffset: Int
     let seekEnabled: Bool
-    let activeLocalWordIndex: Int?
+    let segmentID: String
+    /// `@Observable` so the read of `activeWordTracker.current` happens
+    /// inside `ParagraphRow.body` — `ReaderView.body` no longer becomes a
+    /// dependent of the per-tick active-word change.
+    let activeWordTracker: ActiveWordTracker
     let highlightMode: HighlightMode
     let annotations: [Annotation]
     let onPlayFromWord: (Int) -> Void
@@ -35,6 +39,13 @@ struct ParagraphRow: View {
     let onDelete: (Annotation) -> Void
     let onToggleWord: (Int) -> Void
     let onPaintWord: (Int) -> Void
+
+    private var activeLocalWordIndex: Int? {
+        guard let aw = activeWordTracker.current, aw.segmentId == segmentID else { return nil }
+        let local = aw.wordIndex - wordOffset
+        let count = text.components(separatedBy: .whitespacesAndNewlines).filter { !$0.isEmpty }.count
+        return (local >= 0 && local < count) ? local : nil
+    }
 
     /// Paragraph-level highlight only. Word-level highlights (locator has a
     /// `w<index>` suffix) tint just the word via `wordHighlights`; matching
