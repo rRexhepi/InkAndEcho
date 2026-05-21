@@ -73,9 +73,8 @@ desktop; optional Calibre for PDF and KF8 conversion).
 
 ## Documents
 
-- `DESIGN.md` — UI conventions and reader-surface decisions.
-- `HANDOFF.md` — running build / state log.
-- `TODO.md` — open work.
+- `DESIGN.md` UI conventions and reader-surface decisions.
+
 
 ## License
 
