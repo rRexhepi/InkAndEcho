@@ -5,6 +5,7 @@ import 'package:flutter/services.dart';
 /// platform-agnostic `FfmpegRunner` skeleton plugs in on Android.
 class AndroidNativeDecoder {
   static const _channel = MethodChannel('inkandecho/native_decoder');
+  static const _streamChannel = EventChannel('inkandecho/native_decoder_stream');
 
   /// Decode (a range of) [sourcePath] into a 16-bit signed-little-endian
   /// WAV at [outputPath], downmixed to [channels] and resampled to
@@ -26,6 +27,24 @@ class AndroidNativeDecoder {
       'sampleRate': sampleRate,
       'channels': channels,
     });
+  }
+
+  /// Stream the entire [sourcePath] as raw s16le PCM at [sampleRate] Hz
+  /// mono. Each event is a `Uint8List` of PCM bytes. The stream completes
+  /// when the file is fully decoded. Mirrors the shape of desktop's
+  /// ffmpeg stdout streaming so the transcriber can use one code path.
+  static Stream<Uint8List> streamDecode({
+    required String sourcePath,
+    int sampleRate = 16000,
+    int channels = 1,
+  }) {
+    return _streamChannel
+        .receiveBroadcastStream({
+          'source': sourcePath,
+          'sampleRate': sampleRate,
+          'channels': channels,
+        })
+        .map((data) => data as Uint8List);
   }
 
   /// Total media duration in seconds via `MediaMetadataRetriever`. Returns

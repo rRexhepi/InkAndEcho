@@ -200,7 +200,8 @@ struct ReaderView: View {
                         selectedSegmentID = loc.segmentID
                     }
                     showAnnotationsSheet = false
-                }
+                },
+                onDismiss: { showAnnotationsSheet = false }
             )
         }
     }

@@ -303,25 +303,18 @@ class WhisperTranscriber {
       return;
     }
 
-    if (FfmpegRunner.instance.supportsStreamingFfmpeg) {
-      yield* _transcribeStreamingDesktop(
-        audio,
-        totalSeconds: totalSeconds,
-        chunkSeconds: chunkSeconds,
-        overlapSeconds: overlapSeconds,
-      );
-    } else {
-      yield* _transcribeChunkedMobile(
-        audio,
-        totalSeconds: totalSeconds,
-        chunkSeconds: chunkSeconds,
-        overlapSeconds: overlapSeconds,
-      );
-    }
+    yield* _transcribeStreaming(
+      audio,
+      totalSeconds: totalSeconds,
+      chunkSeconds: chunkSeconds,
+      overlapSeconds: overlapSeconds,
+    );
   }
 
-  /// Desktop path: one ffmpeg process for the whole file, raw PCM on stdout.
-  Stream<TranscribeProgress> _transcribeStreamingDesktop(
+  /// Streaming path: one decode source for the whole file, raw PCM
+  /// streamed to Dart. Desktop uses a long-lived ffmpeg process on stdout.
+  /// Android uses an EventChannel backed by MediaExtractor + MediaCodec.
+  Stream<TranscribeProgress> _transcribeStreaming(
     File audio, {
     required double totalSeconds,
     required int chunkSeconds,
@@ -332,38 +325,37 @@ class WhisperTranscriber {
     final chunkBytes = chunkSeconds * sampleRate * bytesPerSample;
     final overlapBytes = overlapSeconds * sampleRate * bytesPerSample;
 
-    final proc = await FfmpegRunner.instance.startFfmpeg([
-      '-nostdin',
-      '-loglevel', 'error',
-      '-i', audio.path,
-      '-ar', '$sampleRate',
-      '-ac', '1',
-      '-f', 's16le',
-      '-',
-    ]);
-
-    // Stash stderr for error reporting if ffmpeg exits non-zero. Subscribe
-    // immediately so the OS pipe buffer can't deadlock on a long error log.
+    final runner = FfmpegRunner.instance;
+    final Stream<List<int>> pcmStream;
+    Process? proc;
+    StreamSubscription<String>? stderrSub;
     final stderrBuf = StringBuffer();
-    final stderrSub = proc.stderr
-        .transform(utf8.decoder)
-        .listen(stderrBuf.write);
+
+    if (runner.useNativeAndroid) {
+      pcmStream = runner.startNativeStream(inputPath: audio.path);
+    } else {
+      proc = await runner.startFfmpeg([
+        '-nostdin',
+        '-loglevel', 'error',
+        '-i', audio.path,
+        '-ar', '$sampleRate',
+        '-ac', '1',
+        '-f', 's16le',
+        '-',
+      ]);
+      stderrSub = proc.stderr.transform(utf8.decoder).listen(stderrBuf.write);
+      pcmStream = proc.stdout;
+    }
 
     final acc = BytesBuilder(copy: false);
     var chunkIndex = 0;
     Uint8List carryOver = Uint8List(0);
     final allWords = <AudioWord>[];
     final pool = await _ensurePool();
-    // Cap in-flight chunks so we don't queue 1000+ sample buffers in
-    // memory while a few workers chew through them. `pool.size` lines up
-    // with the number of workers so each worker stays fed without us
-    // hoarding samples for chunks that aren't being processed yet.
     final maxInFlight = pool.size;
     final pending = <_PendingChunk>[];
 
     void dispatchChunk(Uint8List newBytes, {required bool isLast}) {
-      // Prepend the previous chunk's tail so words straddling the boundary
-      // re-decode with full context.
       final Uint8List samplesBytes = carryOver.isEmpty
           ? newBytes
           : (Uint8List(carryOver.length + newBytes.length)
@@ -377,8 +369,6 @@ class WhisperTranscriber {
       final ci = chunkIndex;
 
       final samples = _s16leToFloat32(samplesBytes);
-      // pool.transcribe returns a future immediately and routes to a free
-      // worker behind the scenes — multiple chunks decode in parallel.
       pending.add(_PendingChunk(
         index: ci,
         chunkStartTime: chunkStartTime,
@@ -395,7 +385,7 @@ class WhisperTranscriber {
     }
 
     try {
-      await for (final part in proc.stdout) {
+      await for (final part in pcmStream) {
         acc.add(part);
         while (acc.length >= chunkBytes) {
           final all = acc.takeBytes();
@@ -405,10 +395,6 @@ class WhisperTranscriber {
           }
           dispatchChunk(chunkPiece, isLast: false);
 
-          // Backpressure: drain the oldest chunk's result if we've got
-          // more than `maxInFlight` riding the workers. Yield progress
-          // (and a fresh word list) as each one settles in submission
-          // order so the aligner sees deterministic input.
           while (pending.length > maxInFlight) {
             final c = await _drainOldestPending(pending, allWords);
             yield _progressFor(
@@ -438,12 +424,14 @@ class WhisperTranscriber {
         );
       }
 
-      final code = await proc.exitCode;
-      if (code != 0 && allWords.isEmpty) {
-        throw StateError(
-          'ffmpeg exited with code $code while streaming '
-          '${audio.path}:\n${stderrBuf.toString().trim()}',
-        );
+      if (proc != null) {
+        final code = await proc.exitCode;
+        if (code != 0 && allWords.isEmpty) {
+          throw StateError(
+            'ffmpeg exited with code $code while streaming '
+            '${audio.path}:\n${stderrBuf.toString().trim()}',
+          );
+        }
       }
 
       yield TranscribeProgress(
@@ -452,10 +440,9 @@ class WhisperTranscriber {
         words: allWords,
       );
     } finally {
-      await stderrSub.cancel();
-      // Ensure ffmpeg doesn't linger if the consumer cancels mid-stream.
+      await stderrSub?.cancel();
       try {
-        proc.kill(ProcessSignal.sigterm);
+        proc?.kill(ProcessSignal.sigterm);
       } catch (_) {}
     }
   }
@@ -488,92 +475,6 @@ class WhisperTranscriber {
             ? (c.chunkStartTime + chunkSeconds) / totalSeconds
             : null,
       );
-
-  /// Per-chunk decode via the platform-native audio runner, with up to
-  /// `pool.size` chunks in flight. Pending chunks drain in submission
-  /// order so dedup is deterministic regardless of worker finish order.
-  Stream<TranscribeProgress> _transcribeChunkedMobile(
-    File audio, {
-    required double totalSeconds,
-    required int chunkSeconds,
-    required int overlapSeconds,
-  }) async* {
-    final tmpRoot = await getTemporaryDirectory();
-    final chunkDir = await Directory(
-      '${tmpRoot.path}/palimp_chunks_${DateTime.now().millisecondsSinceEpoch}',
-    ).create(recursive: true);
-    final chunkCount = (totalSeconds / chunkSeconds).ceil();
-    final allWords = <AudioWord>[];
-    final pool = await _ensurePool();
-    final maxInFlight = pool.size;
-    final pending = <_PendingChunk>[];
-
-    Future<_PendingChunk> dispatchChunk(int i) async {
-      // Chunks past the first start `overlapSeconds` early and run that
-      // much longer so boundaries re-decode with context on both sides;
-      // duplicates fall out in [_appendWithOverlapDedup].
-      final start = i == 0 ? 0 : i * chunkSeconds - overlapSeconds;
-      final duration =
-          i == 0 ? chunkSeconds : chunkSeconds + overlapSeconds;
-      final wavPath = '${chunkDir.path}/chunk_$i.wav';
-
-      final result = await FfmpegRunner.instance.decodeToWav(
-        inputPath: audio.path,
-        outputPath: wavPath,
-        startSeconds: start.toDouble(),
-        durationSeconds: duration.toDouble(),
-      );
-      if (!result.ok) {
-        throw StateError(
-          'ffmpeg chunk $i failed (code ${result.code}): ${result.output}',
-        );
-      }
-      final wave = so.readWave(wavPath);
-      if (wave.samples.isEmpty) {
-        throw StateError('Cannot read WAV: $wavPath');
-      }
-      try { await File(wavPath).delete(); } catch (_) {}
-
-      return _PendingChunk(
-        index: i,
-        chunkStartTime: start.toDouble(),
-        overlapEndGlobalTime: (i * chunkSeconds).toDouble(),
-        isFirstChunk: i == 0,
-        future: pool.transcribe(wave.samples, wave.sampleRate),
-      );
-    }
-
-    try {
-      var next = 0;
-      while (next < chunkCount && pending.length < maxInFlight) {
-        pending.add(await dispatchChunk(next));
-        next++;
-      }
-
-      while (pending.isNotEmpty) {
-        final done = await _drainOldestPending(pending, allWords);
-        final elapsedMin =
-            (done.chunkStartTime / 60).toStringAsFixed(0);
-        final totalMin = (totalSeconds / 60).toStringAsFixed(0);
-        yield TranscribeProgress(
-          'Transcribing… $elapsedMin / $totalMin min',
-          fraction: (done.index + 1) / chunkCount,
-        );
-        if (next < chunkCount) {
-          pending.add(await dispatchChunk(next));
-          next++;
-        }
-      }
-
-      yield TranscribeProgress(
-        'Transcribed ${allWords.length} words.',
-        fraction: 1.0,
-        words: allWords,
-      );
-    } finally {
-      try { await chunkDir.delete(recursive: true); } catch (_) {}
-    }
-  }
 
   /// Hand a Float32 sample buffer off to the worker pool. Inference runs
   /// on a background isolate; the UI thread keeps responding to OS

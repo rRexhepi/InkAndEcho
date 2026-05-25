@@ -48,12 +48,14 @@ targets:
         com.apple.security.files.user-selected.read-write: true
         # WhisperKit + CoreML may JIT-compile compute kernels.
         com.apple.security.cs.allow-jit: true
+        com.apple.security.application-groups:
+          - group.com.rexhep.InkAndEcho
     info:
       path: App/InfoiOS.plist
       properties:
         CFBundleDisplayName: "Ink and Echo"
         CFBundleShortVersionString: "0.2.0"
-        CFBundleVersion: "3"
+        CFBundleVersion: "11"
         LSRequiresIPhoneOS: true
         LSApplicationCategoryType: public.app-category.education
         UIFileSharingEnabled: true
@@ -118,11 +120,11 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: com.rexhep.InkAndEcho
         PRODUCT_NAME: InkAndEcho
         MARKETING_VERSION: "0.2.0"
-        CURRENT_PROJECT_VERSION: "3"
+        CURRENT_PROJECT_VERSION: "11"
         SWIFT_VERSION: "6.0"
         TARGETED_DEVICE_FAMILY: "1,2"
         CODE_SIGN_STYLE: Automatic
-        DEVELOPMENT_TEAM: ""
+        DEVELOPMENT_TEAM: HA8444ZZH2
         ENABLE_PREVIEWS: YES
         GENERATE_INFOPLIST_FILE: NO
         SWIFT_STRICT_CONCURRENCY: complete

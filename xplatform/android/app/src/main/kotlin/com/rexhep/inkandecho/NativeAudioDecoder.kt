@@ -25,7 +25,9 @@ import java.nio.ByteOrder
 // no third-party native dep, no 16 KB page-size compliance work to chase.
 object NativeAudioDecoder {
     const val CHANNEL = "inkandecho/native_decoder"
+    const val STREAM_CHANNEL = "inkandecho/native_decoder_stream"
     private const val TIMEOUT_US = 10_000L
+    private const val STREAM_BUFFER_BYTES = 64 * 1024
 
     fun handle(call: MethodCall, result: MethodChannel.Result) {
         try {
@@ -48,6 +50,152 @@ object NativeAudioDecoder {
             }
         } catch (e: Exception) {
             result.error("decode_failed", e.message ?: e.javaClass.simpleName, e.stackTraceToString())
+        }
+    }
+
+    fun createStreamHandler(): io.flutter.plugin.common.EventChannel.StreamHandler {
+        return object : io.flutter.plugin.common.EventChannel.StreamHandler {
+            @Volatile private var cancelled = false
+            private var thread: Thread? = null
+
+            override fun onListen(arguments: Any?, events: io.flutter.plugin.common.EventChannel.EventSink?) {
+                if (events == null || arguments == null) return
+                val args = arguments as Map<*, *>
+                val source = args["source"] as String
+                val sampleRate = (args["sampleRate"] as? Number)?.toInt() ?: 16000
+                val channels = (args["channels"] as? Number)?.toInt() ?: 1
+                cancelled = false
+
+                thread = Thread {
+                    try {
+                        streamDecode(source, sampleRate, channels, events)
+                    } catch (e: Exception) {
+                        android.os.Handler(android.os.Looper.getMainLooper()).post {
+                            events.error("stream_failed", e.message, e.stackTraceToString())
+                        }
+                    }
+                }.also { it.start() }
+            }
+
+            override fun onCancel(arguments: Any?) {
+                cancelled = true
+                thread?.interrupt()
+                thread = null
+            }
+
+            private fun streamDecode(
+                sourcePath: String,
+                targetSampleRate: Int,
+                targetChannels: Int,
+                sink: io.flutter.plugin.common.EventChannel.EventSink,
+            ) {
+                require(targetChannels == 1)
+
+                val extractor = MediaExtractor()
+                extractor.setDataSource(sourcePath)
+
+                val trackIndex = (0 until extractor.trackCount).firstOrNull { i ->
+                    extractor.getTrackFormat(i).getString(MediaFormat.KEY_MIME)?.startsWith("audio/") == true
+                } ?: throw IllegalArgumentException("No audio track in $sourcePath")
+                extractor.selectTrack(trackIndex)
+                val inputFormat = extractor.getTrackFormat(trackIndex)
+                val mime = inputFormat.getString(MediaFormat.KEY_MIME)!!
+
+                val codec = MediaCodec.createDecoderByType(mime)
+                codec.configure(inputFormat, null, null, 0)
+                codec.start()
+
+                var sourceSampleRate = inputFormat.getInteger(MediaFormat.KEY_SAMPLE_RATE)
+                var sourceChannels = inputFormat.getInteger(MediaFormat.KEY_CHANNEL_COUNT)
+                var ratio = sourceSampleRate.toDouble() / targetSampleRate.toDouble()
+                var srcAccum = 0.0
+
+                val bufferInfo = MediaCodec.BufferInfo()
+                var doneInput = false
+                var doneOutput = false
+
+                val emit = ByteBuffer.allocate(STREAM_BUFFER_BYTES).order(ByteOrder.LITTLE_ENDIAN)
+                val handler = android.os.Handler(android.os.Looper.getMainLooper())
+
+                try {
+                    while (!doneOutput && !cancelled) {
+                        if (!doneInput) {
+                            val inIdx = codec.dequeueInputBuffer(TIMEOUT_US)
+                            if (inIdx >= 0) {
+                                val inBuf = codec.getInputBuffer(inIdx)!!
+                                val size = extractor.readSampleData(inBuf, 0)
+                                if (size < 0) {
+                                    codec.queueInputBuffer(inIdx, 0, 0, 0, MediaCodec.BUFFER_FLAG_END_OF_STREAM)
+                                    doneInput = true
+                                } else {
+                                    codec.queueInputBuffer(inIdx, 0, size, extractor.sampleTime, 0)
+                                    extractor.advance()
+                                }
+                            }
+                        }
+
+                        val outIdx = codec.dequeueOutputBuffer(bufferInfo, TIMEOUT_US)
+                        when {
+                            outIdx == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> {
+                                val newFormat = codec.outputFormat
+                                if (newFormat.containsKey(MediaFormat.KEY_SAMPLE_RATE)) {
+                                    sourceSampleRate = newFormat.getInteger(MediaFormat.KEY_SAMPLE_RATE)
+                                }
+                                if (newFormat.containsKey(MediaFormat.KEY_CHANNEL_COUNT)) {
+                                    sourceChannels = newFormat.getInteger(MediaFormat.KEY_CHANNEL_COUNT)
+                                }
+                                ratio = sourceSampleRate.toDouble() / targetSampleRate.toDouble()
+                            }
+                            outIdx >= 0 -> {
+                                if (bufferInfo.size > 0) {
+                                    val outBuf = codec.getOutputBuffer(outIdx)!!
+                                    outBuf.position(bufferInfo.offset)
+                                    outBuf.limit(bufferInfo.offset + bufferInfo.size)
+                                    val shorts = outBuf.order(ByteOrder.LITTLE_ENDIAN).asShortBuffer()
+                                    val frames = shorts.remaining() / sourceChannels
+                                    for (f in 0 until frames) {
+                                        var sum = 0
+                                        for (c in 0 until sourceChannels) {
+                                            sum += shorts.get(f * sourceChannels + c).toInt()
+                                        }
+                                        val mono = (sum / sourceChannels).toShort()
+                                        srcAccum += 1.0
+                                        while (srcAccum >= ratio) {
+                                            srcAccum -= ratio
+                                            if (emit.remaining() < 2) {
+                                                val chunk = ByteArray(emit.position())
+                                                emit.flip()
+                                                emit.get(chunk)
+                                                emit.clear()
+                                                handler.post { sink.success(chunk) }
+                                            }
+                                            emit.putShort(mono)
+                                        }
+                                    }
+                                }
+                                codec.releaseOutputBuffer(outIdx, false)
+                                if (bufferInfo.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0) {
+                                    doneOutput = true
+                                }
+                            }
+                            outIdx == MediaCodec.INFO_TRY_AGAIN_LATER -> {}
+                        }
+                    }
+
+                    if (emit.position() > 0) {
+                        val tail = ByteArray(emit.position())
+                        emit.flip()
+                        emit.get(tail)
+                        handler.post { sink.success(tail) }
+                    }
+
+                    handler.post { sink.endOfStream() }
+                } finally {
+                    codec.stop()
+                    codec.release()
+                    extractor.release()
+                }
+            }
         }
     }
 

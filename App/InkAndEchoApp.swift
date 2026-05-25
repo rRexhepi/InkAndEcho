@@ -17,13 +17,15 @@ struct InkAndEchoApp: App {
 
     var body: some Scene {
         WindowGroup("Ink and Echo") {
-            LibraryView()
-                .environment(alignment as AlignmentCoordinator?)
-                .onAppear { applyTheme(theme) }
-                .onChange(of: themeRaw) { _, newRaw in
-                    let newChoice = ThemeChoice(rawValue: newRaw) ?? .system
-                    applyTheme(newChoice)
-                }
+            MigrationGate {
+                LibraryView()
+                    .environment(alignment as AlignmentCoordinator?)
+            }
+            .onAppear { applyTheme(theme) }
+            .onChange(of: themeRaw) { _, newRaw in
+                let newChoice = ThemeChoice(rawValue: newRaw) ?? .system
+                applyTheme(newChoice)
+            }
         }
         .modelContainer(for: [Book.self, Annotation.self, ReadingProgress.self])
     }

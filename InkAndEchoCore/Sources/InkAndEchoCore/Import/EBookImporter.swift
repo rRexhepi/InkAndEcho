@@ -531,18 +531,34 @@ private func appendSpineSegments(
     appendPreamble(into: &segments, itemref: itemref, xhtml: xhtml, firstSplitOffset: splits[0].offset)
 
     let nsXhtml = xhtml as NSString
+    var pendingTitle: String?
     for i in 0..<splits.count {
         let start = splits[i].offset
         let end = i + 1 < splits.count ? splits[i + 1].offset : nsXhtml.length
         let slice = nsXhtml.substring(with: NSRange(location: start, length: end - start))
         let plain = stripHTML(slice)
         guard !plain.isEmpty else { continue }
+        // Pandoc nests sections: the parent slice contains only the
+        // heading while body text lives in child sections. Merge
+        // heading-only slices forward rather than emitting them alone.
+        let hasBodyContent = plain.count > 120 || plain.contains("\n\n")
+        if !hasBodyContent && i + 1 < splits.count {
+            pendingTitle = splits[i].entry.title
+            continue
+        }
+        let title = pendingTitle ?? splits[i].entry.title
+        pendingTitle = nil
         let fragKey = splits[i].entry.fragment ?? "\(i)"
         segments.append(TextSegment(
             id: "\(itemref)_\(fragKey)",
-            title: splits[i].entry.title,
+            title: title,
             text: plain
         ))
+    }
+    if let title = pendingTitle, let last = segments.last {
+        segments[segments.count - 1] = TextSegment(
+            id: last.id, title: title, text: last.text
+        )
     }
 }
 

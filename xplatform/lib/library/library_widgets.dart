@@ -3,6 +3,7 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 
 import '../persistence/library_storage.dart';
+import '../platform/form_factor.dart';
 import '../theme.dart';
 import '../widgets/app_context_menu.dart';
 
@@ -43,36 +44,60 @@ class LibraryEmptyState extends StatelessWidget {
   }
 }
 
-enum _BookAction { remove }
+enum _BookAction { showInFolder, reimport, remove }
 
 class BookTile extends StatelessWidget {
   final StoredBook book;
   final InkAndEchoColors colors;
   final VoidCallback onTap;
   final VoidCallback onRemove;
+  final VoidCallback? onShowInFolder;
+  final VoidCallback? onReimport;
   const BookTile({
     super.key,
     required this.book,
     required this.colors,
     required this.onTap,
     required this.onRemove,
+    this.onShowInFolder,
+    this.onReimport,
   });
 
   @override
   Widget build(BuildContext context) {
+    final items = <AppContextMenuItem<_BookAction>>[
+      if (isDesktop && onShowInFolder != null)
+        const AppContextMenuItem(
+          value: _BookAction.showInFolder,
+          icon: Icons.folder_open_outlined,
+          label: 'Show in folder',
+        ),
+      if (onReimport != null)
+        const AppContextMenuItem(
+          value: _BookAction.reimport,
+          icon: Icons.refresh_outlined,
+          label: 'Re-import EPUB',
+        ),
+      const AppContextMenuItem(
+        value: _BookAction.remove,
+        icon: Icons.delete_outline,
+        label: 'Remove from library',
+        color: Colors.redAccent,
+      ),
+    ];
     return AppContextMenu<_BookAction>(
       onPrimaryTap: onTap,
       onSelected: (a) {
-        if (a == _BookAction.remove) onRemove();
+        switch (a) {
+          case _BookAction.showInFolder:
+            onShowInFolder?.call();
+          case _BookAction.reimport:
+            onReimport?.call();
+          case _BookAction.remove:
+            onRemove();
+        }
       },
-      items: const [
-        AppContextMenuItem(
-          value: _BookAction.remove,
-          icon: Icons.delete_outline,
-          label: 'Remove from library',
-          color: Colors.redAccent,
-        ),
-      ],
+      items: items,
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [

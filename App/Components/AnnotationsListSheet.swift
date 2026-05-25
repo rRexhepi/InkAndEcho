@@ -8,6 +8,7 @@ struct AnnotationsListSheet: View {
     let book: Book
     let segments: [TextSegment]
     let onJump: (Annotation) -> Void
+    let onDismiss: () -> Void
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
@@ -17,7 +18,10 @@ struct AnnotationsListSheet: View {
                     .font(.system(.title2, design: .serif))
                     .foregroundStyle(Theme.ink)
                 Spacer()
-                Button("Done") { dismiss() }
+                Button("Done") {
+                    onDismiss()
+                    dismiss()
+                }
             }
             .padding(20)
 

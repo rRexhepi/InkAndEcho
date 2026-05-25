@@ -106,6 +106,27 @@ class _LibraryScreenState extends State<LibraryScreen> {
     ));
   }
 
+  Future<void> _showInFolder(StoredBook book) async {
+    final path = await widget.store.bookDirPath(book);
+    if (Platform.isMacOS) {
+      await Process.run('open', [path]);
+    } else if (Platform.isLinux) {
+      await Process.run('xdg-open', [path]);
+    } else if (Platform.isWindows) {
+      await Process.run('explorer', [path]);
+    }
+  }
+
+  Future<void> _reimportBook(StoredBook book) async {
+    final updated = await widget.store.reimportBook(book);
+    if (!mounted) return;
+    if (updated == null && widget.store.lastError != null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(widget.store.lastError!)),
+      );
+    }
+  }
+
   Future<void> _confirmDelete(StoredBook book) async {
     final confirmed = await showAppConfirmDialog(
       context: context,
@@ -176,12 +197,17 @@ class _LibraryScreenState extends State<LibraryScreen> {
               childAspectRatio: 0.52,
             ),
             itemCount: widget.store.books.length,
-            itemBuilder: (_, i) => BookTile(
-              book: widget.store.books[i],
-              colors: context.colors,
-              onTap: () => _openReader(widget.store.books[i]),
-              onRemove: () => _confirmDelete(widget.store.books[i]),
-            ),
+            itemBuilder: (_, i) {
+              final book = widget.store.books[i];
+              return BookTile(
+                book: book,
+                colors: context.colors,
+                onTap: () => _openReader(book),
+                onRemove: () => _confirmDelete(book),
+                onShowInFolder: () => _showInFolder(book),
+                onReimport: () => _reimportBook(book),
+              );
+            },
           );
         },
       ),

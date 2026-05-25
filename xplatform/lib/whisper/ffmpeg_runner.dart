@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:io';
+import 'dart:typed_data';
 
 import 'android_native_decoder.dart';
 
@@ -30,7 +31,7 @@ class FfmpegRunner {
   static final FfmpegRunner instance = FfmpegRunner._();
   FfmpegRunner._();
 
-  bool get _useNativeAndroid => Platform.isAndroid;
+  bool get useNativeAndroid => Platform.isAndroid;
 
   /// Decode a (possibly trimmed) section of [inputPath] into a 16-bit
   /// PCM WAV at [outputPath]. Defaults match what the whisper pipeline
@@ -43,7 +44,7 @@ class FfmpegRunner {
     int sampleRate = 16000,
     int channels = 1,
   }) {
-    if (_useNativeAndroid) {
+    if (useNativeAndroid) {
       return _decodeAndroidNative(
         inputPath: inputPath,
         outputPath: outputPath,
@@ -65,7 +66,7 @@ class FfmpegRunner {
 
   /// Total duration of [inputPath] in seconds, or `0` if the probe fails.
   Future<double> probeDurationSeconds(String inputPath) async {
-    if (_useNativeAndroid) {
+    if (useNativeAndroid) {
       return AndroidNativeDecoder.durationSeconds(inputPath);
     }
     final r = await _runHostBinary(_ffprobeBin, [
@@ -80,19 +81,34 @@ class FfmpegRunner {
   }
 
   /// Spawn ffmpeg with its stdout/stderr exposed for streaming consumption.
-  /// Desktop-only — Android's MediaCodec path runs the decode to
-  /// completion. Callers must `await Process.exitCode` to reap the child.
+  /// Desktop-only. Callers must `await Process.exitCode` to reap the child.
   Future<Process> startFfmpeg(List<String> args) {
-    if (_useNativeAndroid) {
+    if (useNativeAndroid) {
       throw UnsupportedError(
-        'startFfmpeg is desktop-only. On Android, use decodeToWav() which '
-        'runs the decode to completion via MediaExtractor + MediaCodec.',
+        'startFfmpeg is desktop-only. On Android, use startNativeStream().',
       );
     }
     return Process.start(_ffmpegBin, args, runInShell: false);
   }
 
-  bool get supportsStreamingFfmpeg => !_useNativeAndroid;
+  /// Start a streaming decode of [inputPath] on Android via EventChannel.
+  /// Returns a stream of raw s16le PCM bytes, same shape as ffmpeg stdout.
+  Stream<Uint8List> startNativeStream({
+    required String inputPath,
+    int sampleRate = 16000,
+    int channels = 1,
+  }) {
+    if (!useNativeAndroid) {
+      throw UnsupportedError('startNativeStream is Android-only.');
+    }
+    return AndroidNativeDecoder.streamDecode(
+      sourcePath: inputPath,
+      sampleRate: sampleRate,
+      channels: channels,
+    );
+  }
+
+  bool get supportsStreaming => true;
 
   Future<FfmpegResult> _decodeAndroidNative({
     required String inputPath,

@@ -100,6 +100,26 @@ class LibraryStore extends ChangeNotifier {
     notifyListeners();
   }
 
+  String get _ebookConvertBin =>
+      Platform.environment['INK_AND_ECHO_EBOOK_CONVERT'] ??
+      (Platform.isWindows ? 'ebook-convert.exe' : 'ebook-convert');
+
+  Future<bool> _isCalibreAvailable() async {
+    try {
+      final r = await Process.run(_ebookConvertBin, ['--version']);
+      return r.exitCode == 0;
+    } on ProcessException {
+      return false;
+    }
+  }
+
+  static String get _calibreInstallHint {
+    if (Platform.isLinux) return 'Install with: sudo apt install calibre';
+    if (Platform.isWindows) return 'Download from https://calibre-ebook.com/download_windows';
+    if (Platform.isMacOS) return 'Install with: brew install calibre';
+    return 'Download from https://calibre-ebook.com/download';
+  }
+
   Future<StoredBook?> importViaCalibre(File source) async {
     _importing = true;
     _lastError = null;
@@ -107,27 +127,29 @@ class LibraryStore extends ChangeNotifier {
     Directory? tmpDir;
     final label = source.path.split('.').last.toUpperCase();
     try {
-      tmpDir = await Directory.systemTemp.createTemp('palimp_calibre_');
-      final tmpEpub = File('${tmpDir.path}/converted.epub');
-      final exe = Platform.environment['INK_AND_ECHO_EBOOK_CONVERT'] ??
-          (Platform.isWindows ? 'ebook-convert.exe' : 'ebook-convert');
-      final proc = await Process.run(exe, [source.path, tmpEpub.path]);
-      if (proc.exitCode != 0 || !tmpEpub.existsSync()) {
+      if (!await _isCalibreAvailable()) {
         _lastError =
-            '$label conversion failed. Install Calibre and ensure '
-            '`ebook-convert` is on PATH (or set INK_AND_ECHO_EBOOK_CONVERT).'
-            '\n${proc.stderr}';
+            '$label import requires Calibre. '
+            '$_calibreInstallHint, then retry. '
+            '(Or set INK_AND_ECHO_EBOOK_CONVERT to the binary path.)';
         return null;
       }
-      // Hand off to the EPUB importer; clear the flag first so it can
-      // re-set it without tripping the double-import guard.
+      tmpDir = await Directory.systemTemp.createTemp('palimp_calibre_');
+      final tmpEpub = File('${tmpDir.path}/converted.epub');
+      final proc = await Process.run(
+          _ebookConvertBin, [source.path, tmpEpub.path]);
+      if (proc.exitCode != 0 || !tmpEpub.existsSync()) {
+        _lastError =
+            '$label conversion failed (exit ${proc.exitCode}). '
+            '${proc.stderr}'.trim();
+        return null;
+      }
       _importing = false;
       return await importEPUB(tmpEpub);
     } on ProcessException catch (e) {
       _lastError =
           '$label conversion failed: ${e.message}. '
-          'Install Calibre and ensure `ebook-convert` is on PATH '
-          '(or set INK_AND_ECHO_EBOOK_CONVERT).';
+          '$_calibreInstallHint.';
       return null;
     } catch (e) {
       _lastError = '$label conversion failed: $e';
@@ -416,6 +438,54 @@ class LibraryStore extends ChangeNotifier {
     if (i >= 0) _books[i] = updated;
     await storage.save(updated);
     if (notify) notifyListeners();
+  }
+
+  Future<String> bookDirPath(StoredBook book) async {
+    final dir = await storage.bookDir(book.id);
+    return dir.path;
+  }
+
+  Future<StoredBook?> reimportBook(StoredBook book) async {
+    _importing = true;
+    _lastError = null;
+    notifyListeners();
+    try {
+      final dir = await storage.bookDir(book.id);
+      final epubFile = File('${dir.path}/book.epub');
+      if (!epubFile.existsSync()) {
+        _lastError = 'Stored EPUB not found. The book may have been imported '
+            'from a different format.';
+        return null;
+      }
+      final imported = await const EPUBImporter().importBook(epubFile);
+      String? coverPath = book.coverPath;
+      if (imported.coverImageData != null) {
+        final c = File('${dir.path}/cover');
+        await c.writeAsBytes(imported.coverImageData!);
+        coverPath = c.path;
+      }
+      final updated = StoredBook(
+        id: book.id,
+        title: imported.title,
+        author: imported.author,
+        segments: imported.segments,
+        coverPath: coverPath,
+        audioPath: book.audioPath,
+        alignmentPath: book.alignmentPath,
+        addedAt: book.addedAt,
+        currentSegmentIndex: book.currentSegmentIndex,
+        currentPageInChapter: book.currentPageInChapter,
+        currentAudioSeconds: book.currentAudioSeconds,
+      );
+      await _replace(updated);
+      return updated;
+    } catch (e) {
+      _lastError = 'Re-import failed: $e';
+      return null;
+    } finally {
+      _importing = false;
+      notifyListeners();
+    }
   }
 
   Future<void> delete(StoredBook book) async {

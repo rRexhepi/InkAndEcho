@@ -337,17 +337,31 @@ void _appendSpineSegments({
   }
 
   _appendPreamble(segments, itemref, xhtml, splits.first.offset);
+  String? pendingTitle;
   for (var i = 0; i < splits.length; i++) {
     final start = splits[i].offset;
     final end = i + 1 < splits.length ? splits[i + 1].offset : xhtml.length;
     final plain = stripHTML(xhtml.substring(start, end));
     if (plain.isEmpty) continue;
+    final hasBodyContent = plain.length > 120 || plain.contains('\n\n');
+    if (!hasBodyContent && i + 1 < splits.length) {
+      pendingTitle = splits[i].entry.title;
+      continue;
+    }
+    final title = pendingTitle ?? splits[i].entry.title;
+    pendingTitle = null;
     final fragKey = splits[i].entry.fragment ?? '$i';
     segments.add(TextSegment(
       id: '${itemref}_$fragKey',
-      title: splits[i].entry.title,
+      title: title,
       text: plain,
     ));
+  }
+  if (pendingTitle != null && segments.isNotEmpty) {
+    final last = segments.last;
+    segments[segments.length - 1] = TextSegment(
+      id: last.id, title: pendingTitle, text: last.text,
+    );
   }
 }
 
