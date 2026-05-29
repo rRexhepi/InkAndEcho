@@ -25,6 +25,8 @@ enum AppSettings {
     static let animationsEnabledKey = "inkandecho.animationsEnabled"
     /// Color applied when the user taps / drags to highlight a word.
     static let defaultHighlightColorKey = "inkandecho.defaultHighlightColor"
+    /// Tint each word as the audiobook narrates it (read-along).
+    static let wordHighlightingKey = "inkandecho.wordHighlighting"
 
     static func defaultHighlightColor() -> AnnotationColor {
         let raw = UserDefaults.standard.string(forKey: defaultHighlightColorKey) ?? AnnotationColor.amber.rawValue
@@ -36,6 +38,7 @@ struct SettingsView: View {
     @AppStorage(AppSettings.themeKey) private var themeRaw: String = ThemeChoice.system.rawValue
     @AppStorage(AppSettings.animationsEnabledKey) private var animationsEnabled: Bool = true
     @AppStorage(AppSettings.defaultHighlightColorKey) private var defaultHighlightColorRaw: String = AnnotationColor.amber.rawValue
+    @AppStorage(AppSettings.wordHighlightingKey) private var wordHighlightingEnabled: Bool = false
 
     /// Theme value as the sheet was first opened. Used on iOS to detect
     /// "user changed the theme" so we can show the restart prompt — iOS
@@ -75,6 +78,13 @@ struct SettingsView: View {
             Section("Highlights") {
                 highlightColorRow
                 Text("Used when you tap or drag-paint a word.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            Section("Read-along") {
+                Toggle("Highlight the spoken word", isOn: $wordHighlightingEnabled)
+                Text("Tints each word as the audiobook narrates it. Needs an aligned audiobook.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
