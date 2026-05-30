@@ -37,7 +37,7 @@ enum Theme {
     static let accent         = adaptive(light: (139,  90,  43), dark: (201, 154, 106))
     static let onAccent       = adaptive(light: (251, 247, 238), dark: ( 27,  24,  21))
 
-    static let highlightWordSoft = adaptive(light: (250, 239, 203), dark: ( 90,  75,  50))
+    static let highlightWordSoft = adaptive(light: (250, 221, 138), dark: (120, 100,  62))
 }
 
 private func adaptive(light: (Int, Int, Int), dark: (Int, Int, Int)) -> Color {

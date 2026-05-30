@@ -86,6 +86,12 @@ struct ReaderView: View {
     /// (PVC, audio bar, scroll view) on every word change during aligned
     /// audio playback.
     @State var activeWordTracker = ActiveWordTracker()
+    /// Read-along page-follow bookkeeping. `followDrivenPage` is the page the
+    /// narration-follow last set, so a `currentPageIndex` change to anything
+    /// else reads as a manual turn and suspends follow briefly.
+    @State var followDrivenPage: Int?
+    @State var followSuspendedUntil: Date?
+    @State var activeScrollParagraph: Int?
     @State var lastProgressSaveAt: Date?
 
     /// Pre-filtered + pre-sorted anchors per segment. Built once when the
@@ -126,7 +132,12 @@ struct ReaderView: View {
             refreshActiveWord()
             saveProgressIfNeeded(force: true)
         }
-        .onChange(of: currentPageIndex) { _, _ in
+        .onChange(of: currentPageIndex) { _, newValue in
+            if newValue != followDrivenPage {
+                // A turn we didn't drive — the user flipped the page. Back off
+                // narration-follow briefly so we don't yank them back.
+                followSuspendedUntil = Date().addingTimeInterval(4)
+            }
             saveProgressIfNeeded(force: true)
         }
         .onChange(of: alignment.lastFinishedBookID) { _, finished in
@@ -746,6 +757,12 @@ struct ReaderView: View {
                 .onChange(of: selectedSegmentID) { _, _ in
                     proxy.scrollTo("top", anchor: .top)
                 }
+                .onChange(of: activeScrollParagraph) { _, p in
+                    guard let p else { return }
+                    withAnimation(.easeInOut(duration: 0.35)) {
+                        proxy.scrollTo(p, anchor: .center)
+                    }
+                }
             }
         }
     }
@@ -1355,6 +1372,58 @@ struct ReaderView: View {
         text.components(separatedBy: .whitespacesAndNewlines).filter { !$0.isEmpty }
     }
 
+    /// Original-paragraph index (within the chapter) holding the chapter-global
+    /// word `wordIndex`. Counts with `tokenizeWords` so it matches the offsets
+    /// the highlight itself is keyed on.
+    func paragraphIndex(forWordIndex wordIndex: Int, in segment: TextSegment) -> Int? {
+        let paras = paragraphs(of: segment.text)
+        guard !paras.isEmpty else { return nil }
+        var cumulative = 0
+        for (i, para) in paras.enumerated() {
+            cumulative += tokenizeWords(para).count
+            if wordIndex < cumulative { return i }
+        }
+        return paras.count - 1
+    }
+
+    /// The flat-pagination page that renders original paragraph `paraIdx`. Uses
+    /// `flatBoundariesBudget` so the index lines up with the page-curl's flat
+    /// sequence (the same budget `iosBuildPage` paginates with).
+    func pageIndex(forParagraph paraIdx: Int, in segment: TextSegment) -> Int? {
+        let budget = flatBoundariesBudget > 0 ? flatBoundariesBudget : wordsBudget(useSpread: useSpreadMode)
+        for page in pageBreaks(for: segment.text, wordsPerPage: budget)
+        where page.paragraphs.contains(where: { $0.originalIndex == paraIdx }) {
+            return page.index
+        }
+        return nil
+    }
+
+    /// Keep the narrated word on screen while audio plays. Paginated: snap the
+    /// curl to the page holding the active word. Scroll: center its paragraph.
+    /// Gated so it never fights a manual turn, a drag, or a restore.
+    func followNarration() {
+        #if os(iOS)
+        guard wordHighlightingEnabled, engine.state == .playing else { return }
+        guard !isAnimatingTransition, !iosDragActive, !isRestoringProgress else { return }
+        if let until = followSuspendedUntil, Date() < until { return }
+        guard let aw = activeWordTracker.current,
+              let segment = currentSegment,
+              aw.segmentId == segment.id,
+              let paraIdx = paragraphIndex(forWordIndex: aw.wordIndex, in: segment) else { return }
+
+        if paginated, flatTotalPages > 0 {
+            guard let targetPage = pageIndex(forParagraph: paraIdx, in: segment) else { return }
+            let left = (currentPageIndex / 2) * 2
+            let visible: Set<Int> = useSpreadMode ? [left, left + 1] : [currentPageIndex]
+            guard !visible.contains(targetPage) else { return }
+            followDrivenPage = targetPage
+            currentPageIndex = targetPage
+        } else {
+            activeScrollParagraph = paraIdx
+        }
+        #endif
+    }
+
     func refreshActiveWord() {
         guard let map = alignmentMap, let segment = currentSegment else {
             if activeWordTracker.current != nil { activeWordTracker.current = nil }
@@ -1430,6 +1499,7 @@ struct ReaderView: View {
         }
         if synthesized?.wordIndex != activeWordTracker.current?.wordIndex || synthesized?.segmentId != activeWordTracker.current?.segmentId {
             activeWordTracker.current = synthesized
+            followNarration()
         }
     }
 
