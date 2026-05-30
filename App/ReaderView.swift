@@ -125,7 +125,13 @@ struct ReaderView: View {
                     toggleOn: wordHighlightingEnabled,
                     aligned: alignmentMap != nil,
                     anchorCount: currentSegment.flatMap { anchorsBySegment[$0.id]?.count } ?? 0,
-                    segmentID: currentSegment?.id
+                    paginatedActive: paginated && flatTotalPages > 0,
+                    currentPage: currentPageIndex,
+                    targetPageForActive: { wordIndex in
+                        guard let seg = currentSegment,
+                              let p = paragraphIndex(forWordIndex: wordIndex, in: seg) else { return nil }
+                        return pageIndex(forParagraph: p, in: seg)
+                    }
                 )
                 #endif
             }
@@ -2149,12 +2155,15 @@ struct ReadAlongDebugHUD: View {
     let toggleOn: Bool
     let aligned: Bool
     let anchorCount: Int
-    let segmentID: String?
+    let paginatedActive: Bool
+    let currentPage: Int
+    let targetPageForActive: (Int) -> Int?
 
     var body: some View {
         let aw = tracker.current
-        let awStr = aw.map { "w\($0.wordIndex)@\($0.segmentId.suffix(4))" } ?? "nil"
-        Text("RA tog:\(toggleOn ? "Y" : "N") aln:\(aligned ? "Y" : "N") anch:\(anchorCount) play:\(engine.state == .playing ? "Y" : "N") t:\(Int(engine.currentTime)) aw:\(awStr) seg:\(segmentID.map { String($0.suffix(4)) } ?? "nil")")
+        let awStr = aw.map { "w\($0.wordIndex)" } ?? "nil"
+        let tgt = aw.flatMap { targetPageForActive($0.wordIndex) }
+        Text("RA tog:\(toggleOn ? "Y" : "N") aln:\(aligned ? "Y" : "N") anch:\(anchorCount) play:\(engine.state == .playing ? "Y" : "N") t:\(Int(engine.currentTime)) aw:\(awStr) pag:\(paginatedActive ? "Y" : "N") cur:\(currentPage) tgt:\(tgt.map(String.init) ?? "nil")")
             .font(.system(size: 11, weight: .bold, design: .monospaced))
             .padding(.horizontal, 8)
             .padding(.vertical, 4)
