@@ -31,6 +31,10 @@ public struct AlignmentMap: Codable, Sendable {
     /// project audio time onto book word position at the narrator's actual
     /// pace instead of uniform time-to-word linear interpolation.
     public let audioWordStarts: [Double]
+    /// Dense per-book-word start times for read-along highlighting (one entry
+    /// per chapter). Empty on pre-dense caches; the reader treats an empty
+    /// `wordTimes` with non-empty `words` as "needs re-align".
+    public let wordTimes: [SegmentWordTimes]
     public let createdAt: Date
     public let modelIdentifier: String
 
@@ -38,18 +42,20 @@ public struct AlignmentMap: Codable, Sendable {
         words: [WordAnchor],
         sentences: [SentenceAnchor],
         audioWordStarts: [Double] = [],
+        wordTimes: [SegmentWordTimes] = [],
         createdAt: Date,
         modelIdentifier: String
     ) {
         self.words = words
         self.sentences = sentences
         self.audioWordStarts = audioWordStarts
+        self.wordTimes = wordTimes
         self.createdAt = createdAt
         self.modelIdentifier = modelIdentifier
     }
 
     private enum CodingKeys: String, CodingKey {
-        case words, sentences, audioWordStarts, createdAt, modelIdentifier
+        case words, sentences, audioWordStarts, wordTimes, createdAt, modelIdentifier
     }
 
     public init(from decoder: Decoder) throws {
@@ -57,6 +63,7 @@ public struct AlignmentMap: Codable, Sendable {
         self.words = try c.decode([WordAnchor].self, forKey: .words)
         self.sentences = try c.decode([SentenceAnchor].self, forKey: .sentences)
         self.audioWordStarts = (try? c.decode([Double].self, forKey: .audioWordStarts)) ?? []
+        self.wordTimes = (try? c.decode([SegmentWordTimes].self, forKey: .wordTimes)) ?? []
         self.createdAt = try c.decode(Date.self, forKey: .createdAt)
         self.modelIdentifier = try c.decode(String.self, forKey: .modelIdentifier)
     }
@@ -115,5 +122,24 @@ public struct SentenceAnchor: Codable, Sendable, Hashable {
         self.sentenceIndex = sentenceIndex
         self.startSeconds = startSeconds
         self.endSeconds = endSeconds
+    }
+}
+
+/// Dense per-book-word start times for one chapter, for read-along
+/// highlighting. `wordIndices[i]` (the segment-local token index the reader
+/// looks up) begins being narrated at `starts[i]`. Stored as parallel arrays
+/// so the long segment id isn't repeated per word. Within a chapter the
+/// arrays are in book order, which is increasing time; chapters are stored in
+/// reading order, so concatenating all chapters yields one globally
+/// time-sorted sequence the reader can binary-search.
+public struct SegmentWordTimes: Codable, Sendable, Hashable {
+    public let segmentId: String
+    public let wordIndices: [Int]
+    public let starts: [Double]
+
+    public init(segmentId: String, wordIndices: [Int], starts: [Double]) {
+        self.segmentId = segmentId
+        self.wordIndices = wordIndices
+        self.starts = starts
     }
 }

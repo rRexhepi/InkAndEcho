@@ -216,11 +216,13 @@ public struct WhisperAligner: AudioTextAligner {
 
         let sentences = deriveSentenceAnchors(words: wordAnchors, segments: segments)
         let audioWordStarts = audio.map { $0.startSeconds }
+        let wordTimes = computeWordTimes(bookWords: bookWords, audio: audio, anchors: validated)
 
         return AlignmentMap(
             words: wordAnchors,
             sentences: sentences,
             audioWordStarts: audioWordStarts,
+            wordTimes: wordTimes,
             createdAt: .now,
             modelIdentifier: modelIdentifier
         )
@@ -287,6 +289,97 @@ public struct WhisperAligner: AudioTextAligner {
             }
         }
         return pairs
+    }
+
+    /// Dense per-book-word start times for read-along highlighting. The sparse
+    /// `anchors` give a correct coarse alignment that re-syncs the stream; here
+    /// we fill in EVERY book word so the highlight never skips. Within each
+    /// anchor gap we greedily match that gap's book words to that gap's audio
+    /// words — the bracketing anchors keep the search local, so even common
+    /// words ("the", "and") can't mis-match a far-away occurrence. Matched
+    /// words get their real Whisper time; unmatched words (narrator skips, ASR
+    /// misses) are linearly interpolated between matched neighbours. Times are
+    /// forced strictly increasing so every word owns a distinct slice and the
+    /// reader's time→word lookup is unambiguous. Pure function, no Apple deps,
+    /// so it ports to the Flutter aligner unchanged.
+    func computeWordTimes(
+        bookWords: [BookWord],
+        audio: [AudioWord],
+        anchors: [(bookIdx: Int, audioIdx: Int)]
+    ) -> [SegmentWordTimes] {
+        let n = bookWords.count
+        guard n > 0, !audio.isEmpty, !anchors.isEmpty else { return [] }
+
+        // Pin known times at every anchor, then match within each gap.
+        var known = [Double?](repeating: nil, count: n)
+        for a in anchors where a.bookIdx < n && a.audioIdx < audio.count {
+            known[a.bookIdx] = audio[a.audioIdx].startSeconds
+        }
+        for g in 0..<(anchors.count - 1) {
+            let bp = anchors[g].bookIdx, ap = anchors[g].audioIdx
+            let bf = anchors[g + 1].bookIdx, af = anchors[g + 1].audioIdx
+            guard bp < bf, ap < af, bf <= n, af <= audio.count else { continue }
+            var cursor = ap + 1
+            for bi in (bp + 1)..<bf {
+                guard cursor < af else { break }
+                let target = bookWords[bi].normalized
+                if let ai = (cursor..<af).first(where: { audio[$0].text == target }) {
+                    known[bi] = audio[ai].startSeconds
+                    cursor = ai + 1
+                }
+            }
+        }
+
+        // Fill: clamp head/tail to the first/last known time, linearly
+        // interpolate interior runs between matched neighbours.
+        let knownIdx = (0..<n).filter { known[$0] != nil }
+        guard let first = knownIdx.first, let last = knownIdx.last else { return [] }
+        var times = [Double](repeating: 0, count: n)
+        for i in 0...first { times[i] = known[first]! }
+        for k in 0..<(knownIdx.count - 1) {
+            let a = knownIdx[k], b = knownIdx[k + 1]
+            let ta = known[a]!, tb = known[b]!
+            times[a] = ta
+            if b - a > 1 {
+                let span = tb - ta
+                for i in (a + 1)..<b {
+                    times[i] = ta + span * (Double(i - a) / Double(b - a))
+                }
+            }
+            times[b] = tb
+        }
+        if last < n { for i in last..<n { times[i] = known[last]! } }
+
+        // Strictly increasing so each word owns a distinct time slice.
+        if n > 1 {
+            for i in 1..<n where times[i] <= times[i - 1] {
+                times[i] = times[i - 1] + 0.001
+            }
+        }
+
+        // Group into per-segment parallel arrays (book words are contiguous by
+        // segment, in reading order).
+        var result: [SegmentWordTimes] = []
+        var curSeg: String?
+        var idxs: [Int] = []
+        var starts: [Double] = []
+        for i in 0..<n {
+            let bw = bookWords[i]
+            if bw.segmentId != curSeg {
+                if let s = curSeg {
+                    result.append(SegmentWordTimes(segmentId: s, wordIndices: idxs, starts: starts))
+                }
+                curSeg = bw.segmentId
+                idxs = []
+                starts = []
+            }
+            idxs.append(bw.indexInSegment)
+            starts.append(times[i])
+        }
+        if let s = curSeg {
+            result.append(SegmentWordTimes(segmentId: s, wordIndices: idxs, starts: starts))
+        }
+        return result
     }
 
     private func emptyMap() -> AlignmentMap {
@@ -380,14 +473,14 @@ private func formatETA(_ seconds: TimeInterval) -> String {
 
 // MARK: - Helpers
 
-private struct AudioWord: Sendable {
+struct AudioWord: Sendable {
     let text: String
     let startSeconds: Double
     let endSeconds: Double
     let confidence: Float
 }
 
-private struct BookWord: Sendable {
+struct BookWord: Sendable {
     let segmentId: String
     let indexInSegment: Int
     let normalized: String
