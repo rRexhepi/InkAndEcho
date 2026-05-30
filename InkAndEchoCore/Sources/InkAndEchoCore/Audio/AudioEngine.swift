@@ -189,13 +189,13 @@ public final class AudioEngine {
 
     private func startDisplayTimer() {
         stopDisplayTimer()
-        // 10 Hz. The audio bar / scrubber doesn't need finer than this
-        // perceptually, and every tick fires SwiftUI body invalidation +
-        // `onChange(of: currentTime)` consumers. At 60 Hz, the
-        // active-word recomputation on a large alignment map (10s of
-        // thousands of anchors) blocks the main thread enough to freeze
-        // the reader while audio is playing.
-        displayTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 10.0, repeats: true) { [weak self] _ in
+        // 30 Hz. Fine enough that read-along word highlighting doesn't skip
+        // short words at normal or 2x narration. The historical 10 Hz cap was
+        // there because the old active-word recompute scanned the whole
+        // alignment map (tens of thousands of anchors) every tick; the current
+        // lookup is O(log n) over pre-sorted per-segment anchors, so 30 Hz
+        // stays cheap on the main thread.
+        displayTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 30.0, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.tickCurrentTime() }
         }
     }
