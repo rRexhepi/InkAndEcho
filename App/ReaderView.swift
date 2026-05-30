@@ -117,6 +117,18 @@ struct ReaderView: View {
         readerLayout
             .background(Theme.canvas)
             .navigationTitle(book.title)
+            .overlay(alignment: .top) {
+                #if DEBUG
+                ReadAlongDebugHUD(
+                    engine: engine,
+                    tracker: activeWordTracker,
+                    toggleOn: wordHighlightingEnabled,
+                    aligned: alignmentMap != nil,
+                    anchorCount: currentSegment.flatMap { anchorsBySegment[$0.id]?.count } ?? 0,
+                    segmentID: currentSegment?.id
+                )
+                #endif
+            }
         .background {
             // Engine ticks `currentTime` at 10 Hz; isolating the read
             // here keeps it out of `ReaderView.body`, which would
@@ -2127,6 +2139,33 @@ private struct AudioTimeWatcher: View {
 final class ActiveWordTracker {
     var current: WordAnchor?
 }
+
+#if DEBUG
+/// Temporary read-along diagnostic. Shows the live state of the highlight
+/// chain so we can see exactly where it breaks. Remove once verified.
+struct ReadAlongDebugHUD: View {
+    var engine: AudioEngine
+    var tracker: ActiveWordTracker
+    let toggleOn: Bool
+    let aligned: Bool
+    let anchorCount: Int
+    let segmentID: String?
+
+    var body: some View {
+        let aw = tracker.current
+        let awStr = aw.map { "w\($0.wordIndex)@\($0.segmentId.suffix(4))" } ?? "nil"
+        Text("RA tog:\(toggleOn ? "Y" : "N") aln:\(aligned ? "Y" : "N") anch:\(anchorCount) play:\(engine.state == .playing ? "Y" : "N") t:\(Int(engine.currentTime)) aw:\(awStr) seg:\(segmentID.map { String($0.suffix(4)) } ?? "nil")")
+            .font(.system(size: 11, weight: .bold, design: .monospaced))
+            .padding(.horizontal, 8)
+            .padding(.vertical, 4)
+            .background(Color.black.opacity(0.82))
+            .foregroundStyle(Color.green)
+            .clipShape(Capsule())
+            .allowsHitTesting(false)
+            .padding(.top, 4)
+    }
+}
+#endif
 
 struct ParagraphAnchor: Identifiable, Equatable {
     let segmentID: String
