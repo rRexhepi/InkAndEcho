@@ -113,20 +113,16 @@ struct ParagraphRow: View {
         .padding(.horizontal, highlight != nil ? 8 : 0)
         .padding(.vertical, highlight != nil ? 4 : 0)
         .background(highlightBackground)
-        .overlay {
-            // TEMP read-along diagnostic: wash the paragraph holding the
-            // narrated word, at the SwiftUI layer (not via the text view).
-            // Confirms the row re-renders + activeLocalWordIndex resolves,
-            // independent of the UITextView attribute path.
-            if activeLocalWordIndex != nil {
-                Color.red.opacity(0.28).allowsHitTesting(false)
-            }
-        }
         .clipShape(RoundedRectangle(cornerRadius: 4))
         .contextMenu { contextMenuContent }
     }
 
     private func buildAttributedString() -> (AttributedString, [(localIndex: Int, range: NSRange)]) {
+        // Active read-along word for this paragraph, computed once. Applied
+        // per-word in `appendWord` (the same mechanism as paint highlights,
+        // which render reliably) rather than via a post-assembly range
+        // subscript, which doesn't survive the NSAttributedString bridge.
+        let activeIdx: Int? = highlightMode == .word ? activeLocalWordIndex : nil
         var result = AttributedString()
         var inWord = false
         var wordStart = text.startIndex
@@ -139,7 +135,7 @@ struct ParagraphRow: View {
             if ch.isWhitespace || ch.isNewline {
                 if inWord {
                     let wordSlice = String(text[wordStart..<i])
-                    appendWord(wordSlice, localIndex: localWordIdx, into: &result, ranges: &attrRanges)
+                    appendWord(wordSlice, localIndex: localWordIdx, into: &result, ranges: &attrRanges, activeIndex: activeIdx)
                     localWordIdx += 1
                     inWord = false
                 }
@@ -154,18 +150,7 @@ struct ParagraphRow: View {
         }
         if inWord {
             let wordSlice = String(text[wordStart..<text.endIndex])
-            appendWord(wordSlice, localIndex: localWordIdx, into: &result, ranges: &attrRanges)
-        }
-
-        if let active = activeLocalWordIndex {
-            switch highlightMode {
-            case .word:
-                if let entry = attrRanges.first(where: { $0.local == active }) {
-                    result[entry.range].backgroundColor = Theme.highlightWordSoft
-                }
-            case .none:
-                break
-            }
+            appendWord(wordSlice, localIndex: localWordIdx, into: &result, ranges: &attrRanges, activeIndex: activeIdx)
         }
 
         let nsRanges: [(localIndex: Int, range: NSRange)] = attrRanges.map { entry in
@@ -174,13 +159,18 @@ struct ParagraphRow: View {
         return (result, nsRanges)
     }
 
-    private func appendWord(_ word: String, localIndex: Int, into result: inout AttributedString, ranges: inout [(local: Int, range: Range<AttributedString.Index>)]) {
+    private func appendWord(_ word: String, localIndex: Int, into result: inout AttributedString, ranges: inout [(local: Int, range: Range<AttributedString.Index>)], activeIndex: Int? = nil) {
         var attr = AttributedString(word)
         attr.foregroundColor = Theme.ink
         // Per-word background. The wider paragraph-level pill is drawn
         // separately in `highlightBackground` so both can coexist.
         if let wordColor = wordHighlights[localIndex] {
             attr.backgroundColor = colorView(for: wordColor).opacity(0.30)
+        }
+        // Read-along: tint the currently-narrated word on the single-word run
+        // before append, exactly as the paint highlight above (which renders).
+        if localIndex == activeIndex {
+            attr.backgroundColor = Theme.highlightWordSoft
         }
         let start = result.endIndex
         result.append(attr)
