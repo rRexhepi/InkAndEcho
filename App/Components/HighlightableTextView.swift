@@ -9,6 +9,7 @@ import UIKit
 struct HighlightableTextView: UIViewRepresentable {
     let attributedString: AttributedString
     let wordRanges: [(localIndex: Int, range: NSRange)]
+    let wordBackgrounds: [(range: NSRange, color: UIColor)]
     let onToggleWord: (Int) -> Void
     let onPaintWord: (Int) -> Void
 
@@ -38,7 +39,7 @@ struct HighlightableTextView: UIViewRepresentable {
         v.wordRanges = wordRanges
         v.onToggleWord = onToggleWord
         v.onPaintWord = onPaintWord
-        v.applyAttributedString(attributedString)
+        v.applyAttributedString(attributedString, backgrounds: wordBackgrounds)
     }
 
     /// `textView(_:editMenuForTextIn:suggestedActions:)` is the documented
@@ -102,12 +103,21 @@ struct HighlightableTextView: UIViewRepresentable {
             return CGSize(width: UIView.noIntrinsicMetric, height: ceil(size.height))
         }
 
-        func applyAttributedString(_ s: AttributedString) {
+        func applyAttributedString(_ s: AttributedString, backgrounds: [(range: NSRange, color: UIColor)] = []) {
             let ns = NSMutableAttributedString(attributedString: NSAttributedString(s))
             let full = NSRange(location: 0, length: ns.length)
             let para = NSMutableParagraphStyle()
             para.lineSpacing = 8
             ns.addAttribute(NSAttributedString.Key.paragraphStyle, value: para, range: full)
+            // SwiftUI `Color` backgrounds don't survive `NSAttributedString(_:)`,
+            // so per-word paint + read-along backgrounds are applied here as real
+            // UIColor attributes (same reason `textColor` is force-set below).
+            for bg in backgrounds {
+                let r = NSIntersectionRange(bg.range, full)
+                if r.length > 0 {
+                    ns.addAttribute(.backgroundColor, value: bg.color, range: r)
+                }
+            }
             if attributedText?.isEqual(to: ns) != true {
                 attributedText = ns
                 invalidateIntrinsicContentSize()

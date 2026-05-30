@@ -102,10 +102,11 @@ struct ParagraphRow: View {
     }
 
     private var paragraphText: some View {
-        let (attrString, ranges) = buildAttributedString()
+        let (attrString, ranges, backgrounds) = buildAttributedString()
         return HighlightableTextView(
             attributedString: attrString,
             wordRanges: ranges,
+            wordBackgrounds: backgrounds,
             onToggleWord: onToggleWord,
             onPaintWord: onPaintWord
         )
@@ -117,11 +118,8 @@ struct ParagraphRow: View {
         .contextMenu { contextMenuContent }
     }
 
-    private func buildAttributedString() -> (AttributedString, [(localIndex: Int, range: NSRange)]) {
-        // Active read-along word for this paragraph, computed once. Applied
-        // per-word in `appendWord` (the same mechanism as paint highlights,
-        // which render reliably) rather than via a post-assembly range
-        // subscript, which doesn't survive the NSAttributedString bridge.
+    private func buildAttributedString() -> (AttributedString, [(localIndex: Int, range: NSRange)], [(range: NSRange, color: UIColor)]) {
+        // Active read-along word for this paragraph, computed once.
         let activeIdx: Int? = highlightMode == .word ? activeLocalWordIndex : nil
         var result = AttributedString()
         var inWord = false
@@ -135,7 +133,7 @@ struct ParagraphRow: View {
             if ch.isWhitespace || ch.isNewline {
                 if inWord {
                     let wordSlice = String(text[wordStart..<i])
-                    appendWord(wordSlice, localIndex: localWordIdx, into: &result, ranges: &attrRanges, activeIndex: activeIdx)
+                    appendWord(wordSlice, localIndex: localWordIdx, into: &result, ranges: &attrRanges)
                     localWordIdx += 1
                     inWord = false
                 }
@@ -150,28 +148,32 @@ struct ParagraphRow: View {
         }
         if inWord {
             let wordSlice = String(text[wordStart..<text.endIndex])
-            appendWord(wordSlice, localIndex: localWordIdx, into: &result, ranges: &attrRanges, activeIndex: activeIdx)
+            appendWord(wordSlice, localIndex: localWordIdx, into: &result, ranges: &attrRanges)
         }
 
         let nsRanges: [(localIndex: Int, range: NSRange)] = attrRanges.map { entry in
             (entry.local, NSRange(entry.range, in: result))
         }
-        return (result, nsRanges)
+        // Per-word backgrounds carried as real UIColor and applied in the text
+        // view via NSAttributedString.Key.backgroundColor. A SwiftUI `Color`
+        // background set on an AttributedString does NOT survive
+        // `NSAttributedString(_:)`, so paint + read-along both go out-of-band.
+        // Read-along (active word) wins over a manual paint color.
+        let backgrounds: [(range: NSRange, color: UIColor)] = nsRanges.compactMap { entry in
+            if entry.localIndex == activeIdx {
+                return (entry.range, UIColor(Theme.highlightWordSoft))
+            }
+            if let wc = wordHighlights[entry.localIndex] {
+                return (entry.range, UIColor(colorView(for: wc)).withAlphaComponent(0.30))
+            }
+            return nil
+        }
+        return (result, nsRanges, backgrounds)
     }
 
-    private func appendWord(_ word: String, localIndex: Int, into result: inout AttributedString, ranges: inout [(local: Int, range: Range<AttributedString.Index>)], activeIndex: Int? = nil) {
+    private func appendWord(_ word: String, localIndex: Int, into result: inout AttributedString, ranges: inout [(local: Int, range: Range<AttributedString.Index>)]) {
         var attr = AttributedString(word)
         attr.foregroundColor = Theme.ink
-        // Per-word background. The wider paragraph-level pill is drawn
-        // separately in `highlightBackground` so both can coexist.
-        if let wordColor = wordHighlights[localIndex] {
-            attr.backgroundColor = colorView(for: wordColor).opacity(0.30)
-        }
-        // Read-along: tint the currently-narrated word on the single-word run
-        // before append, exactly as the paint highlight above (which renders).
-        if localIndex == activeIndex {
-            attr.backgroundColor = Theme.highlightWordSoft
-        }
         let start = result.endIndex
         result.append(attr)
         let end = result.endIndex
