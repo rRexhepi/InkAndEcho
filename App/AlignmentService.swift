@@ -80,7 +80,12 @@ struct AlignmentService {
         guard let data = try? Data(contentsOf: url) else { return nil }
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
-        return try? decoder.decode(AlignmentMap.self, from: data)
+        guard let map = try? decoder.decode(AlignmentMap.self, from: data) else { return nil }
+        // Pre-dense caches (no per-word times) can't drive skip-free read-along.
+        // Treat them as absent so the book prompts a re-align, which writes the
+        // new format.
+        if map.wordTimes.isEmpty && !map.words.isEmpty { return nil }
+        return map
     }
 }
 

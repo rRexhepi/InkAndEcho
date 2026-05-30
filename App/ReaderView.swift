@@ -101,6 +101,9 @@ struct ReaderView: View {
     /// — 10 Hz × O(N) blocked the main thread enough to freeze playback.
     @State var anchorsBySegment: [String: [WordAnchor]] = [:]
     @State var anchorsBySegmentAudioIdx: [String: [WordAnchor]] = [:]
+    /// Every book word with its narration start time, flattened across all
+    /// chapters and time-sorted. The read-along highlight binary-searches this.
+    @State var denseWords: [DenseWord] = []
     /// True while `restoreProgress` is mid-flight. Suppresses the
     /// `selectedSegmentID → currentPageIndex = 0` reset so the restored
     /// page index survives the chapter assignment.
@@ -1443,99 +1446,39 @@ struct ReaderView: View {
     }
 
     func refreshActiveWord() {
-        guard let map = alignmentMap, let segment = currentSegment else {
+        guard !denseWords.isEmpty else {
             if activeWordTracker.current != nil { activeWordTracker.current = nil }
             return
         }
-        guard let segAnchorsByStart = anchorsBySegment[segment.id], !segAnchorsByStart.isEmpty else {
-            if activeWordTracker.current != nil { activeWordTracker.current = nil }
-            return
-        }
-
-        // Compensate for audio output latency. Engine.currentTime tracks the
-        // latest rendered sample, but the user hears it ~latency seconds later
-        // in wall-clock; in source-time that gap scales with playback rate.
-        let latencyOffset = engine.outputLatency * Double(engine.rate)
-        let t = max(0, engine.currentTime - latencyOffset)
-
-        // Prefer audio-word-index projection (natural narrator pacing). Falls
-        // back to time interpolation when an old alignment.json doesn't have
-        // audioWordStarts populated.
-        let segAnchorsByAudio = anchorsBySegmentAudioIdx[segment.id] ?? []
-        let useAudioIndexPath = !map.audioWordStarts.isEmpty && !segAnchorsByAudio.isEmpty
-
-        let estimatedBookWordIndex: Int?
-        let chosenAudioIndex: Int
-
-        if useAudioIndexPath {
-            let audioIdx = audioWordIndex(forTime: t, in: map.audioWordStarts)
-            chosenAudioIndex = audioIdx
-
-            var preceding: WordAnchor?
-            var following: WordAnchor?
-            for anchor in segAnchorsByAudio {
-                if anchor.audioIndex <= audioIdx { preceding = anchor }
-                else { following = anchor; break }
-            }
-            if let p = preceding, let f = following, f.audioIndex > p.audioIndex {
-                let frac = Double(audioIdx - p.audioIndex) / Double(f.audioIndex - p.audioIndex)
-                let bookSpan = Double(f.wordIndex - p.wordIndex)
-                estimatedBookWordIndex = p.wordIndex + Int((bookSpan * frac).rounded())
-            } else if let p = preceding {
-                estimatedBookWordIndex = p.wordIndex
-            } else {
-                estimatedBookWordIndex = nil
-            }
-        } else {
-            chosenAudioIndex = -1
-            var preceding: WordAnchor?
-            var following: WordAnchor?
-            for anchor in segAnchorsByStart {
-                if anchor.startSeconds <= t { preceding = anchor }
-                else { following = anchor; break }
-            }
-            if let p = preceding, let f = following, f.startSeconds > p.startSeconds {
-                let frac = (t - p.startSeconds) / (f.startSeconds - p.startSeconds)
-                let bookSpan = Double(f.wordIndex - p.wordIndex)
-                estimatedBookWordIndex = p.wordIndex + Int((bookSpan * frac).rounded())
-            } else if let p = preceding {
-                estimatedBookWordIndex = p.wordIndex
-            } else {
-                estimatedBookWordIndex = nil
-            }
-        }
-
-        let synthesized = estimatedBookWordIndex.map {
-            WordAnchor(
-                segmentId: segment.id,
-                wordIndex: $0,
-                startSeconds: t,
-                endSeconds: t + 0.25,
-                audioIndex: chosenAudioIndex,
-                confidence: 0.5
-            )
-        }
-        if synthesized?.wordIndex != activeWordTracker.current?.wordIndex || synthesized?.segmentId != activeWordTracker.current?.segmentId {
-            activeWordTracker.current = synthesized
-            followNarration()
-        }
+        // Subtract output latency (scaled by rate) so the highlight matches what
+        // is audible, not the latest rendered sample.
+        let t = max(0, engine.currentTime - engine.outputLatency * Double(engine.rate))
+        let dw = denseWords[denseWordIndex(forTime: t)]
+        let changed = dw.wordIndex != activeWordTracker.current?.wordIndex
+            || dw.segmentId != activeWordTracker.current?.segmentId
+        guard changed else { return }
+        activeWordTracker.current = WordAnchor(
+            segmentId: dw.segmentId,
+            wordIndex: dw.wordIndex,
+            startSeconds: dw.start,
+            endSeconds: dw.start + 0.25,
+            audioIndex: -1,
+            confidence: 1
+        )
+        followNarration()
     }
 
-    /// Binary-search for the audio-word index whose start time is the latest
-    /// at or before `t`. Returns 0 if `t` is before everything.
-    func audioWordIndex(forTime t: TimeInterval, in starts: [Double]) -> Int {
-        guard !starts.isEmpty else { return 0 }
-        var lo = 0
-        var hi = starts.count - 1
-        var best = 0
+    /// Largest dense-word index whose start time is at or before `t`, 0 if `t`
+    /// precedes everything. `denseWords` is time-sorted across all chapters, so
+    /// this yields the currently-narrated word AND its chapter directly, with no
+    /// assumption that the displayed chapter is the one being read.
+    func denseWordIndex(forTime t: TimeInterval) -> Int {
+        guard !denseWords.isEmpty else { return 0 }
+        var lo = 0, hi = denseWords.count - 1, best = 0
         while lo <= hi {
             let mid = (lo + hi) / 2
-            if starts[mid] <= t {
-                best = mid
-                lo = mid + 1
-            } else {
-                hi = mid - 1
-            }
+            if denseWords[mid].start <= t { best = mid; lo = mid + 1 }
+            else { hi = mid - 1 }
         }
         return best
     }
@@ -1986,6 +1929,7 @@ struct ReaderView: View {
         guard let map = alignmentMap else {
             anchorsBySegment = [:]
             anchorsBySegmentAudioIdx = [:]
+            denseWords = []
             return
         }
         var byStart: [String: [WordAnchor]] = [:]
@@ -2004,6 +1948,19 @@ struct ReaderView: View {
         }
         anchorsBySegment = byStart
         anchorsBySegmentAudioIdx = byAudio
+
+        // Flatten dense per-word times into one time-sorted list for the
+        // read-along highlight. Stored per-segment in reading order, so the
+        // concatenation is already time-ordered; sort defensively.
+        var dense: [DenseWord] = []
+        for swt in map.wordTimes {
+            let count = min(swt.wordIndices.count, swt.starts.count)
+            for i in 0..<count {
+                dense.append(DenseWord(start: swt.starts[i], segmentId: swt.segmentId, wordIndex: swt.wordIndices[i]))
+            }
+        }
+        dense.sort { $0.start < $1.start }
+        denseWords = dense
     }
 
     // MARK: - Alignment
@@ -2144,6 +2101,14 @@ private struct AudioTimeWatcher: View {
 @Observable
 final class ActiveWordTracker {
     var current: WordAnchor?
+}
+
+/// One book word with its narration start time. The read-along highlight
+/// binary-searches a time-sorted array of these against `engine.currentTime`.
+struct DenseWord {
+    let start: Double
+    let segmentId: String
+    let wordIndex: Int
 }
 
 #if DEBUG
