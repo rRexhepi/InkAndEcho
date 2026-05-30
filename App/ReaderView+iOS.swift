@@ -54,7 +54,7 @@ extension ReaderView {
                 // identity change explicitly. Without it the action saves
                 // but the page looks unchanged until you flip away and back
                 // — or worse, until you relaunch the app.
-                .id("curl-\(useSpread ? "spread" : "single")-\(flatBoundariesBudget)-\(segments.count)-\(annotationRevision)")
+                .id("curl-\(useSpread ? "spread" : "single")-\(flatBoundariesBudget)-\(segments.count)-\(annotationRevision)-ra\(wordHighlightingEnabled ? 1 : 0)")
                 .clipShape(RoundedRectangle(cornerRadius: 6))
                 .overlay(
                     RoundedRectangle(cornerRadius: 6)
