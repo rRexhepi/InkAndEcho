@@ -113,6 +113,15 @@ struct ParagraphRow: View {
         .padding(.horizontal, highlight != nil ? 8 : 0)
         .padding(.vertical, highlight != nil ? 4 : 0)
         .background(highlightBackground)
+        .overlay {
+            // TEMP read-along diagnostic: wash the paragraph holding the
+            // narrated word, at the SwiftUI layer (not via the text view).
+            // Confirms the row re-renders + activeLocalWordIndex resolves,
+            // independent of the UITextView attribute path.
+            if activeLocalWordIndex != nil {
+                Color.red.opacity(0.28).allowsHitTesting(false)
+            }
+        }
         .clipShape(RoundedRectangle(cornerRadius: 4))
         .contextMenu { contextMenuContent }
     }
