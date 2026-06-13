@@ -268,7 +268,7 @@ extension ReaderView {
             Divider().background(Theme.hairline)
             sidebarTabBar
             Divider().background(Theme.hairline)
-            sidebarTabContent
+            sidebarTabContent()
             Divider().background(Theme.hairline)
             sidebarFooter
         }
@@ -507,13 +507,10 @@ extension ReaderView {
             .padding(.horizontal, 24)
             .padding(.bottom, 14)
             Divider().background(Theme.hairline)
-            sidebarTabContent
+            sidebarTabContent(onNavigate: { iosShowChapterSheet = false })
                 .background(Theme.canvas)
         }
         .background(Theme.canvas)
-        .onChange(of: selectedSegmentID) { _, _ in
-            iosShowChapterSheet = false
-        }
     }
 
     var iosSettingsSheet: some View {

@@ -506,7 +506,7 @@ struct ReaderView: View {
             Divider().background(Theme.hairline)
             sidebarTabBar
             Divider().background(Theme.hairline)
-            sidebarTabContent
+            sidebarTabContent()
             Divider().background(Theme.hairline)
             sidebarFooter
         }
@@ -559,20 +559,26 @@ struct ReaderView: View {
         .padding(.horizontal, 14)
     }
 
+    /// `onNavigate` fires after a row navigates the reader. The phone drawer
+    /// passes a dismiss closure so a USER tap closes the sheet; the iPad /
+    /// macOS persistent sidebar passes nil. This is provenance-based on
+    /// purpose: the old `.onChange(of: selectedSegmentID)` dismissal also
+    /// fired on narration-follow chapter crosses, closing the contents sheet
+    /// under the reader's finger.
     @ViewBuilder
-    var sidebarTabContent: some View {
+    func sidebarTabContent(onNavigate: (() -> Void)? = nil) -> some View {
         switch sidebarTab {
-        case .chapters: chaptersTab
-        case .bookmarks: bookmarksTab
-        case .notes: notesTab
+        case .chapters: chaptersTab(onNavigate: onNavigate)
+        case .bookmarks: bookmarksTab(onNavigate: onNavigate)
+        case .notes: notesTab(onNavigate: onNavigate)
         }
     }
 
-    var chaptersTab: some View {
+    func chaptersTab(onNavigate: (() -> Void)?) -> some View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 2) {
                 ForEach(Array(segments.enumerated()), id: \.element.id) { index, segment in
-                    chapterRow(segment: segment, index: index)
+                    chapterRow(segment: segment, index: index, onNavigate: onNavigate)
                 }
             }
             .padding(.horizontal, 8)
@@ -580,10 +586,11 @@ struct ReaderView: View {
         }
     }
 
-    func chapterRow(segment: TextSegment, index: Int) -> some View {
+    func chapterRow(segment: TextSegment, index: Int, onNavigate: (() -> Void)? = nil) -> some View {
         let isSelected = selectedSegmentID == segment.id
         return Button {
             selectedSegmentID = segment.id
+            onNavigate?()
         } label: {
             HStack(alignment: .center, spacing: 10) {
                 Text(romanNumeral(index + 1))
@@ -619,23 +626,25 @@ struct ReaderView: View {
         .buttonStyle(.plain)
     }
 
-    var bookmarksTab: some View {
+    func bookmarksTab(onNavigate: (() -> Void)?) -> some View {
         annotationListTab(
             kind: .bookmark,
             emptyIcon: "bookmark",
-            emptyText: "No bookmarks yet"
+            emptyText: "No bookmarks yet",
+            onNavigate: onNavigate
         )
     }
 
-    var notesTab: some View {
+    func notesTab(onNavigate: (() -> Void)?) -> some View {
         annotationListTab(
             kind: .note,
             emptyIcon: "text.bubble",
-            emptyText: "No notes yet"
+            emptyText: "No notes yet",
+            onNavigate: onNavigate
         )
     }
 
-    func annotationListTab(kind: AnnotationKind, emptyIcon: String, emptyText: String) -> some View {
+    func annotationListTab(kind: AnnotationKind, emptyIcon: String, emptyText: String, onNavigate: (() -> Void)? = nil) -> some View {
         let items = sortedAnnotationsForSidebar(kind: kind)
         return Group {
             if items.isEmpty {
@@ -644,7 +653,7 @@ struct ReaderView: View {
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 2) {
                         ForEach(items) { annotation in
-                            sidebarAnnotationRow(annotation)
+                            sidebarAnnotationRow(annotation, onNavigate: onNavigate)
                         }
                     }
                     .padding(.horizontal, 8)
@@ -667,11 +676,13 @@ struct ReaderView: View {
         .padding(.vertical, 60)
     }
 
-    func sidebarAnnotationRow(_ annotation: Annotation) -> some View {
+    func sidebarAnnotationRow(_ annotation: Annotation, onNavigate: (() -> Void)? = nil) -> some View {
         Button {
-            if let loc = annotation.paragraphLocation {
-                selectedSegmentID = loc.segmentID
-            }
+            // Route through `jump(to:)` so the tap lands on the annotation's
+            // paragraph, not page 0 of its chapter (the same fix the
+            // all-annotations sheet got).
+            jump(to: annotation)
+            onNavigate?()
         } label: {
             VStack(alignment: .leading, spacing: 4) {
                 Text(sidebarAnnotationChapterLabel(annotation))
