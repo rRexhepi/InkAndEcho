@@ -37,13 +37,26 @@ struct AlignmentService {
         // locks the screen anyway, iOS gives us a grace window (a few
         // minutes) before suspending. Without this, suspension is
         // immediate and the alignment job stalls.
-        let bgTaskID = UIApplication.shared.beginBackgroundTask(withName: "InkAndEcho.alignment") {
-            // Expiration handler: iOS revoked the grace window. Nothing
-            // we can do but stop holding it; the in-flight Task will be
-            // suspended at the next await point.
+        // The expiration handler MUST end the task itself: returning without
+        // calling `endBackgroundTask` when the grace window expires gets the
+        // process killed (0x8badf00d) instead of suspended — locking the
+        // screen during a long alignment took the whole app down. The box
+        // dance lets the handler and the defer share one-shot semantics.
+        final class TaskIDBox: @unchecked Sendable {
+            var id: UIBackgroundTaskIdentifier = .invalid
+        }
+        let box = TaskIDBox()
+        box.id = UIApplication.shared.beginBackgroundTask(withName: "InkAndEcho.alignment") {
+            if box.id != .invalid {
+                UIApplication.shared.endBackgroundTask(box.id)
+                box.id = .invalid
+            }
         }
         defer {
-            UIApplication.shared.endBackgroundTask(bgTaskID)
+            if box.id != .invalid {
+                UIApplication.shared.endBackgroundTask(box.id)
+                box.id = .invalid
+            }
             UIApplication.shared.isIdleTimerDisabled = priorIdleTimer
         }
         #endif

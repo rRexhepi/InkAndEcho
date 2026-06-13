@@ -27,18 +27,32 @@ final class AlignmentCoordinator {
 
     private var task: Task<Void, Never>?
 
+    /// Monotonic job counter. Cancellation is cooperative — a cancelled
+    /// task's epilogue can land seconds later, after a NEW job has started;
+    /// the generation check keeps that stale epilogue from clearing the
+    /// successor's state (which read as "nothing running" and allowed a
+    /// third, genuinely concurrent WhisperKit run).
+    private var generation = 0
+
     func start(book: Book, modelContext: ModelContext) {
         guard !isRunning else { return }
         let bookID = book.id
+        generation += 1
+        let myGeneration = generation
         currentBookID = bookID
         stage = .loadingModel(model: "preparing")
         error = nil
+        // Re-arm the completion signal: it's only consumed via onChange, so
+        // re-aligning the same book in one session would otherwise write the
+        // same value over itself and never fire the reader's reload.
+        lastFinishedBookID = nil
         task = Task { @MainActor [weak self] in
             guard let self else { return }
             let service = AlignmentService(modelContext: modelContext)
             do {
                 try await service.runAlignment(for: book) { [weak self] s in
-                    self?.stage = s
+                    guard let self, self.generation == myGeneration else { return }
+                    self.stage = s
                 }
                 let count = service.loadAlignmentMap(for: book)?.words.count ?? 0
                 self.toast = count == 0
@@ -52,8 +66,11 @@ final class AlignmentCoordinator {
             } catch is CancellationError {
                 // Silent — the user explicitly aborted.
             } catch {
-                self.error = error.localizedDescription
+                if self.generation == myGeneration {
+                    self.error = error.localizedDescription
+                }
             }
+            guard self.generation == myGeneration else { return }
             self.currentBookID = nil
             self.stage = nil
             self.lastFinishedBookID = bookID
@@ -63,6 +80,9 @@ final class AlignmentCoordinator {
     func cancel() {
         task?.cancel()
         task = nil
+        // Bump the generation so the cancelled task's epilogue becomes a
+        // no-op, then clear state here (the epilogue won't).
+        generation += 1
         currentBookID = nil
         stage = nil
     }

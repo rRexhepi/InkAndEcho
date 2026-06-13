@@ -96,6 +96,9 @@ targets:
           - CFBundleTypeName: Audiobook
             LSHandlerRank: Alternate
             LSItemContentTypes:
+              # .m4b — the app's headline audiobook format; without its UTI
+              # the share sheet never offers Ink and Echo for it.
+              - com.apple.protected-mpeg-4-audio-b
               - com.apple.m4a-audio
               - public.mp3
           - CFBundleTypeName: MOBI Book

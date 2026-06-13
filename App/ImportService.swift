@@ -41,13 +41,13 @@ struct ImportService {
         try FileManager.default.createDirectory(at: bookDir, withIntermediateDirectories: true)
 
         let storedURL = bookDir.appendingPathComponent("book.\(storedExt)")
-        try FileManager.default.copyItem(at: sourceURL, to: storedURL)
+        try await Self.copyOffMain(from: sourceURL, to: storedURL)
 
         let book = Book(
             id: bookID,
             title: imported.title,
             author: imported.author,
-            coverImageData: imported.coverImageData,
+            coverImageData: imported.coverImageData.map { downsampledCoverData($0) },
             ebookFileURL: storedURL,
             audiobookFileURL: nil,
             alignmentMapURL: nil,
@@ -74,13 +74,22 @@ struct ImportService {
         let needsScope = url.startAccessingSecurityScopedResource()
         defer { if needsScope { url.stopAccessingSecurityScopedResource() } }
 
-        // Replace path: nuke every prior `audiobook.*` file (the new pick
-        // may have a different extension than the previous one, so a
-        // same-name remove isn't enough) and invalidate the alignment map
-        // — it was computed against the old audio and the new one almost
-        // certainly has different word timestamps.
+        // Copy FIRST, into a temp name. The old flow deleted the previous
+        // `audiobook.*` and `alignment.json` before copying — and `copyItem`
+        // fails routinely (undownloaded iCloud file, disk full on a multi-GB
+        // m4b), which destroyed the user's working audiobook plus a
+        // 30-minute alignment and left `audiobookFileURL` pointing at
+        // nothing. Nothing is removed until the new file is safely on disk.
+        let tempURL = bookDir.appendingPathComponent("audiobook.incoming.\(url.pathExtension)")
+        try? FileManager.default.removeItem(at: tempURL)
+        try await Self.copyOffMain(from: url, to: tempURL)
+
+        // New audio is safe — now retire the old audio and its alignment
+        // (computed against the old audio's timestamps). The new pick may
+        // have a different extension, so a same-name remove isn't enough.
         if let contents = try? FileManager.default.contentsOfDirectory(at: bookDir, includingPropertiesForKeys: nil) {
-            for entry in contents where entry.lastPathComponent.hasPrefix("audiobook.") {
+            for entry in contents
+            where entry.lastPathComponent.hasPrefix("audiobook.") && entry != tempURL {
                 try? FileManager.default.removeItem(at: entry)
             }
         }
@@ -88,7 +97,7 @@ struct ImportService {
         try? FileManager.default.removeItem(at: alignmentPath)
         book.alignmentMapURL = nil
 
-        try FileManager.default.copyItem(at: url, to: stored)
+        try FileManager.default.moveItem(at: tempURL, to: stored)
 
         let asset = AVURLAsset(url: stored)
         let duration = (try? await asset.load(.duration)) ?? .zero
@@ -98,13 +107,31 @@ struct ImportService {
         try modelContext.save()
     }
 
-    /// Removes a book and its on-disk files.
+    /// Removes a book and its on-disk files. Record first, files second: if
+    /// the save fails, the book is still intact rather than a zombie row
+    /// pointing at deleted files. The directory is derived from the book ID
+    /// (not the ebook URL), so a book whose ebook copy failed but whose
+    /// audio exists doesn't orphan its files forever.
     func deleteBook(_ book: Book) throws {
-        if let ebookURL = book.resolvedEbookURL {
-            try? FileManager.default.removeItem(at: ebookURL.deletingLastPathComponent())
-        }
+        let bookID = book.id
         modelContext.delete(book)
         try modelContext.save()
+        let dir = try appStorageURL()
+            .appendingPathComponent("Books", isDirectory: true)
+            .appendingPathComponent(bookID.uuidString, isDirectory: true)
+        try? FileManager.default.removeItem(at: dir)
+    }
+
+    /// Byte copies happen off the main actor — a multi-hundred-MB m4b copy
+    /// inline froze the UI for its full duration. The security-scoped access
+    /// started by the caller is process-wide per URL, so it remains valid on
+    /// the worker thread (the caller's `defer` stops it only after this
+    /// returns). Same-volume moves/removals stay inline: they're metadata
+    /// operations.
+    private static func copyOffMain(from src: URL, to dst: URL) async throws {
+        try await Task.detached(priority: .userInitiated) {
+            try FileManager.default.copyItem(at: src, to: dst)
+        }.value
     }
 
     private func appStorageURL() throws -> URL {

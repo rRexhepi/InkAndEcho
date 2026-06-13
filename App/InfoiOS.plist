@@ -35,6 +35,7 @@
 			<string>Alternate</string>
 			<key>LSItemContentTypes</key>
 			<array>
+				<string>com.apple.protected-mpeg-4-audio-b</string>
 				<string>com.apple.m4a-audio</string>
 				<string>public.mp3</string>
 			</array>

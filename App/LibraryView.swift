@@ -5,6 +5,7 @@ import InkAndEchoCore
 
 struct LibraryView: View {
     @Environment(\.modelContext) private var modelContext
+    @Environment(AlignmentCoordinator.self) private var alignment
     @Query(sort: \Book.addedAt, order: .reverse) private var books: [Book]
     @State private var selectedBook: Book?
     @State private var showingImporter = false
@@ -30,6 +31,13 @@ struct LibraryView: View {
                 allowedContentTypes: importContentTypes
             ) { result in
                 handleImportPicker(result)
+            }
+            // "Open in Ink and Echo" from Files / Mail / Safari. The app
+            // declares CFBundleDocumentTypes for these formats; without this
+            // handler the system launches the app and the URL silently
+            // vanishes.
+            .onOpenURL { url in
+                handleOpenURL(url)
             }
             .alert("Import failed", isPresented: Binding(
                 get: { importError != nil },
@@ -149,19 +157,36 @@ struct LibraryView: View {
     private func handleImportPicker(_ result: Result<URL, Error>) {
         switch result {
         case .success(let url):
-            Task { @MainActor in
-                importing = true
-                defer { importing = false }
-                do {
-                    let service = ImportService(modelContext: modelContext)
-                    let book = try await service.importBook(from: url)
-                    selectedBook = book
-                } catch {
-                    importError = error.localizedDescription
-                }
-            }
+            importBook(at: url)
         case .failure(let error):
             importError = error.localizedDescription
+        }
+    }
+
+    /// Shared by the file picker and "Open in…" URLs.
+    private func importBook(at url: URL) {
+        Task { @MainActor in
+            importing = true
+            defer { importing = false }
+            do {
+                let service = ImportService(modelContext: modelContext)
+                let book = try await service.importBook(from: url)
+                selectedBook = book
+            } catch {
+                importError = error.localizedDescription
+            }
+        }
+    }
+
+    private func handleOpenURL(_ url: URL) {
+        let ext = url.pathExtension.lowercased()
+        let audioExtensions: Set<String> = ["m4b", "m4a", "mp3"]
+        if audioExtensions.contains(ext) {
+            // Audiobooks attach to a book, they aren't books — there's no
+            // sensible standalone import. Tell the user where the flow lives.
+            importError = "Audiobooks attach from inside a book: open the book, then tap “Attach audiobook”."
+        } else {
+            importBook(at: url)
         }
     }
 
@@ -170,8 +195,18 @@ struct LibraryView: View {
             selectedBook = nil
             lastOpenedBookID = ""
         }
+        // A WhisperKit job for a deleted book would otherwise grind on for
+        // up to half an hour, then fail into a global error alert — while
+        // blocking the single alignment slot the whole time.
+        if alignment.isRunning(for: book.id) {
+            alignment.cancel()
+        }
         let service = ImportService(modelContext: modelContext)
-        try? service.deleteBook(book)
+        do {
+            try service.deleteBook(book)
+        } catch {
+            importError = "Couldn't remove the book: \(error.localizedDescription)"
+        }
     }
 
     private func restoreLastBookIfNeeded() {
@@ -250,7 +285,13 @@ private struct BookCard: View {
     }
 
     private var generatedCover: some View {
-        let hue = Double(abs(book.title.hashValue) % 360)
+        // Stable FNV-1a, not `hashValue`: String hashing is seeded per
+        // process, so placeholder cover colors reshuffled every launch (and
+        // `abs(Int.min)` traps, however unlikely).
+        let digest = book.title.utf8.reduce(UInt64(14_695_981_039_346_656_037)) {
+            ($0 ^ UInt64($1)) &* 1_099_511_628_211
+        }
+        let hue = Double(digest % 360)
         return GeometryReader { geo in
             ZStack(alignment: .topLeading) {
                 LinearGradient(
