@@ -57,6 +57,17 @@ public final class AudioEngine {
     private var seekOffsetSeconds: TimeInterval = 0
     private var baselineSampleTime: AVAudioFramePosition = 0
 
+    /// Monotonic token bumped on every (re)schedule and on `stop()`. Each
+    /// `.dataPlayedBack` completion handler captures the token live when its
+    /// segment is queued; `handlePlaybackEnded` ignores any callback whose
+    /// token is stale. `player.stop()` (every seek, every unload) flushes the
+    /// queue and fires the *previous* segment's handler asynchronously — without
+    /// this guard that flush-fired handler races the freshly-scheduled segment
+    /// and can pause playback that just started, or flip `.idle` back to
+    /// `.paused` after an unload. The old position-only heuristic only caught
+    /// the EOF-adjacent slice of that race.
+    private var scheduleGeneration = 0
+
     /// Invalidated in `deinit` (legal: deinit has exclusive access to stored
     /// properties, and SwiftUI deallocates the engine on the main thread).
     /// Without that hook, popping the reader mid-playback strands a
@@ -429,6 +440,7 @@ public final class AudioEngine {
     /// its audiobook replaced — a clean slate before the next `load`.
     public func stop() {
         player.stop()
+        scheduleGeneration += 1   // invalidate the handler the flush above fires
         stopDisplayTimer()
         audioFile = nil
         audioURL = nil
@@ -476,13 +488,16 @@ public final class AudioEngine {
         seekOffsetSeconds = clamped
         baselineSampleTime = 0
         currentTime = clamped
+        // Bump before the frame guard so even a no-frames (at/past EOF) seek
+        // invalidates the handler the caller's `player.stop()` just flushed.
+        scheduleGeneration += 1
         guard frameCount > 0 else { return false }
+        let generation = scheduleGeneration
         // `.dataPlayedBack`: fire when the audio is actually audible-complete,
         // not when the last buffer is merely consumed from the queue (the
-        // handler-only variant), which lands early by the output buffer length
-        // and made EOF detection racy against the 50 ms guard.
+        // handler-only variant), which lands early by the output buffer length.
         player.scheduleSegment(file, startingFrame: startFrame, frameCount: frameCount, at: nil, completionCallbackType: .dataPlayedBack) { [weak self] _ in
-            Task { @MainActor in self?.handlePlaybackEnded() }
+            Task { @MainActor in self?.handlePlaybackEnded(generation: generation) }
         }
         return true
     }
@@ -500,8 +515,10 @@ public final class AudioEngine {
         guard let file = audioFile else { return }
         player.stop()
         baselineSampleTime = 0
+        scheduleGeneration += 1
+        let generation = scheduleGeneration
         player.scheduleFile(file, at: nil, completionCallbackType: .dataPlayedBack) { [weak self] _ in
-            Task { @MainActor in self?.handlePlaybackEnded() }
+            Task { @MainActor in self?.handlePlaybackEnded(generation: generation) }
         }
     }
 
@@ -519,15 +536,14 @@ public final class AudioEngine {
         baselineSampleTime = playerTime.sampleTime
     }
 
-    private func handlePlaybackEnded() {
-        // This fires both at genuine EOF and whenever `player.stop()` flushes
-        // the queue (every seek). Distinguish by position — but recompute it
-        // first: the cached `currentTime` is up to one display tick stale,
-        // which at 2× is ~67 ms of source time, more than the old 50 ms
-        // window. A genuine EOF rejected here never retries, leaving a
-        // zombie `.playing` state pinned at the end of the file.
-        tickCurrentTime()
-        guard currentTime >= duration - 0.25 else { return }
+    /// Fires at genuine EOF *and* on every `player.stop()` flush (seek, unload,
+    /// reschedule). `generation` is the schedule token captured when this
+    /// segment was queued: a flush bumps the token before the flushed handler
+    /// runs, so only the still-current segment reaches the body. Every
+    /// scheduled segment runs to the end of the file, so a current-token
+    /// completion is always a true EOF — the old position heuristic is gone.
+    private func handlePlaybackEnded(generation: Int) {
+        guard generation == scheduleGeneration else { return }
         currentTime = duration
         state = .paused
         stopDisplayTimer()
