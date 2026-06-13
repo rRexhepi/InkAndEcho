@@ -10,8 +10,14 @@ struct HighlightableTextView: UIViewRepresentable {
     let attributedString: AttributedString
     let wordRanges: [(localIndex: Int, range: NSRange)]
     let wordBackgrounds: [(range: NSRange, color: UIColor)]
+    /// Tint shown live under the finger while drag-painting, before the
+    /// annotations commit at gesture end.
+    let paintPreviewColor: UIColor
     let onToggleWord: (Int) -> Void
     let onPaintWord: (Int) -> Void
+    /// Fired once when a paint gesture (drag or edit-menu Highlight)
+    /// finishes — the canonical-re-render point.
+    let onPaintEnded: () -> Void
 
     func makeCoordinator() -> Coordinator { Coordinator() }
 
@@ -39,6 +45,8 @@ struct HighlightableTextView: UIViewRepresentable {
         v.wordRanges = wordRanges
         v.onToggleWord = onToggleWord
         v.onPaintWord = onPaintWord
+        v.onPaintEnded = onPaintEnded
+        v.paintPreviewColor = paintPreviewColor
         v.applyAttributedString(attributedString, backgrounds: wordBackgrounds)
     }
 
@@ -59,6 +67,7 @@ struct HighlightableTextView: UIViewRepresentable {
             guard !words.isEmpty, let paint = inner.onPaintWord else { return nil }
             let highlight = UIAction(title: "Highlight") { [weak inner] _ in
                 for idx in words { paint(idx) }
+                inner?.onPaintEnded?()
                 inner?.selectedTextRange = nil
             }
             return UIMenu(children: [highlight] + suggestedActions)
@@ -69,6 +78,8 @@ struct HighlightableTextView: UIViewRepresentable {
         var wordRanges: [(localIndex: Int, range: NSRange)] = []
         var onToggleWord: ((Int) -> Void)?
         var onPaintWord: ((Int) -> Void)?
+        var onPaintEnded: (() -> Void)?
+        var paintPreviewColor: UIColor = .systemYellow.withAlphaComponent(0.3)
 
         /// Squared pixel threshold before a press is reclassified as a drag.
         /// Below this, lift = tap (toggle); at/above, the drag begins and we
@@ -109,9 +120,19 @@ struct HighlightableTextView: UIViewRepresentable {
             let para = NSMutableParagraphStyle()
             para.lineSpacing = 8
             ns.addAttribute(NSAttributedString.Key.paragraphStyle, value: para, range: full)
+            // Font + ink go INTO the candidate string, not onto the view
+            // after assignment. The old view-level `font =` / `textColor =`
+            // setters wrote `.font`/`.foregroundColor` into the live storage
+            // only, so the freshly built `ns` never compared equal and every
+            // update reassigned `attributedText` — a full TextKit relayout
+            // per row per word tick that also killed any in-progress text
+            // selection. (They're also why UIKit renders a color at all: the
+            // bridged SwiftUI.ForegroundColor key means nothing to UITextView.)
+            ns.addAttribute(.font, value: Self.serifBody, range: full)
+            ns.addAttribute(.foregroundColor, value: UIColor(Theme.ink), range: full)
             // SwiftUI `Color` backgrounds don't survive `NSAttributedString(_:)`,
             // so per-word paint + read-along backgrounds are applied here as real
-            // UIColor attributes (same reason `textColor` is force-set below).
+            // UIColor attributes.
             for bg in backgrounds {
                 let r = NSIntersectionRange(bg.range, full)
                 if r.length > 0 {
@@ -122,8 +143,6 @@ struct HighlightableTextView: UIViewRepresentable {
                 attributedText = ns
                 invalidateIntrinsicContentSize()
             }
-            font = Self.serifBody
-            textColor = UIColor(Theme.ink)
             tintColor = UIColor(Theme.ink)
         }
 
@@ -157,20 +176,34 @@ struct HighlightableTextView: UIViewRepresentable {
                     inDragSession = true
                     if let w = startWord, !visited.contains(w) {
                         visited.insert(w)
-                        onPaintWord?(w)
+                        paintWordDuringDrag(w)
                     }
                 }
             }
             if inDragSession, let idx = wordIndex(at: p), !visited.contains(idx) {
                 visited.insert(idx)
-                onPaintWord?(idx)
+                paintWordDuringDrag(idx)
             }
             super.touchesMoved(touches, with: event)
+        }
+
+        /// Insert the annotation AND tint the word locally. The canonical
+        /// re-render is deferred to gesture end (`onPaintEnded`) because it
+        /// re-identifies the page container — doing that per word destroyed
+        /// this very text view mid-drag. The transient attribute is what the
+        /// user sees until then; the commit's rebuild replaces it.
+        private func paintWordDuringDrag(_ idx: Int) {
+            onPaintWord?(idx)
+            if let entry = wordRanges.first(where: { $0.localIndex == idx }) {
+                textStorage.addAttribute(.backgroundColor, value: paintPreviewColor, range: entry.range)
+            }
         }
 
         override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) {
             if !inDragSession, let w = startWord {
                 onToggleWord?(w)
+            } else if inDragSession, !visited.isEmpty {
+                onPaintEnded?()
             }
             touchStart = nil
             startWord = nil
@@ -180,6 +213,11 @@ struct HighlightableTextView: UIViewRepresentable {
         }
 
         override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent?) {
+            if inDragSession, !visited.isEmpty {
+                // The words painted so far are already inserted; commit the
+                // re-render so the canonical tint replaces the transient one.
+                onPaintEnded?()
+            }
             touchStart = nil
             startWord = nil
             visited.removeAll()

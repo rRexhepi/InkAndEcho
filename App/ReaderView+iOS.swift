@@ -17,12 +17,12 @@ extension ReaderView {
         }
     }
 
-    /// iOS replacement for `pageContent`. Uses `PageCurlReaderContainer`
+    /// The reader's page surface. Uses `PageCurlReaderContainer`
     /// (UIPageViewController.pageCurl) so the page-turn animation is
     /// identical to Apple's Books app — gesture-driven curl from any
     /// edge, peek-the-next-page when you lift the corner, swipe-velocity
-    /// determines whether the turn completes or springs back. macOS keeps
-    /// the SwiftUI dog-ear since UIPageViewController is iOS-only.
+    /// determines whether the turn completes or springs back. Catalyst
+    /// runs the same UIKit path on macOS.
     ///
     /// `useSpread = true` switches the underlying `UIPageViewController`
     /// to `.mid` spine so two pages render side-by-side. iPad landscape
@@ -74,6 +74,11 @@ extension ReaderView {
         .frame(maxWidth: .infinity)
         .background(Theme.canvasCool)
         .focusable()
+        // Without explicitly taking focus, `onKeyPress` never fires —
+        // arrow-key / space page turns on iPad keyboards and Catalyst
+        // depended on the focus system happening to pick this Group.
+        .focused($pageFocused)
+        .onAppear { pageFocused = true }
         .onKeyPress(.leftArrow) {
             iosFlipController?(false)
             return .handled

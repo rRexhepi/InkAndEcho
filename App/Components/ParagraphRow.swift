@@ -4,9 +4,10 @@ import InkAndEchoCore
 import UIKit
 #endif
 
-/// Active-word highlighting mode for `ParagraphRow`. Set to `.none` to
-/// disable; word/sentence variants tint the audible word or its sentence
-/// while the audiobook plays at 1× rate.
+/// Active-word highlighting mode for `ParagraphRow`. `.word` tints the word
+/// currently being narrated, at any playback rate; `.none` disables
+/// read-along highlighting (and skips the tracker read entirely, so rows
+/// don't invalidate on word changes).
 enum HighlightMode {
     case word
     case none
@@ -23,6 +24,11 @@ struct ParagraphRow: View {
     let text: String
     let paragraphIndex: Int
     let wordOffset: Int
+    /// Where this row's text begins within its original paragraph (non-zero
+    /// for chunks of a split paragraph). Word-highlight locators are stored
+    /// paragraph-relative; displayed indices are chunk-relative — this is
+    /// the bridge between the two.
+    let chunkWordOffset: Int
     let seekEnabled: Bool
     let segmentID: String
     /// `@Observable` so the read of `activeWordTracker.current` happens
@@ -39,11 +45,12 @@ struct ParagraphRow: View {
     let onDelete: (Annotation) -> Void
     let onToggleWord: (Int) -> Void
     let onPaintWord: (Int) -> Void
+    let onPaintEnded: () -> Void
 
     private var activeLocalWordIndex: Int? {
         guard let aw = activeWordTracker.current, aw.segmentId == segmentID else { return nil }
         let local = aw.wordIndex - wordOffset
-        let count = text.components(separatedBy: .whitespacesAndNewlines).filter { !$0.isEmpty }.count
+        let count = tokenizeWords(text).count
         return (local >= 0 && local < count) ? local : nil
     }
 
@@ -107,15 +114,22 @@ struct ParagraphRow: View {
             attributedString: attrString,
             wordRanges: ranges,
             wordBackgrounds: backgrounds,
+            paintPreviewColor: UIColor(colorView(for: AppSettings.defaultHighlightColor())).withAlphaComponent(0.30),
             onToggleWord: onToggleWord,
-            onPaintWord: onPaintWord
+            onPaintWord: onPaintWord,
+            onPaintEnded: onPaintEnded
         )
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.horizontal, highlight != nil ? 8 : 0)
         .padding(.vertical, highlight != nil ? 4 : 0)
         .background(highlightBackground)
         .clipShape(RoundedRectangle(cornerRadius: 4))
-        .contextMenu { contextMenuContent }
+        // No `.contextMenu` on the text itself: its long-press recognizer
+        // preempted UITextView's selection gesture (verified in the
+        // simulator — the paragraph lifted into a preview and the loupe /
+        // Copy / Look Up / edit-menu Highlight could never fire). Text
+        // long-press belongs to selection; every menu action remains on the
+        // row's ⋯ button, which shows the identical `contextMenuContent`.
     }
 
     private func buildAttributedString() -> (AttributedString, [(localIndex: Int, range: NSRange)], [(range: NSRange, color: UIColor)]) {
@@ -180,15 +194,18 @@ struct ParagraphRow: View {
         ranges.append((localIndex, start..<end))
     }
 
-    /// Word index → highlight color for every word-level highlight on this
-    /// paragraph. Built once per body evaluation (cheap; bookmarks and
-    /// notes are filtered out, so the dictionary is small in practice).
+    /// Displayed-word index → highlight color for every word-level highlight
+    /// on this row. Locators store PARAGRAPH-relative indices; this row may
+    /// render a chunk, so subtract `chunkWordOffset` — highlights belonging
+    /// to other chunks fall out of range and simply don't map. Built once
+    /// per body evaluation (cheap; bookmarks and notes are filtered out, so
+    /// the dictionary is small in practice).
     private var wordHighlights: [Int: AnnotationColor] {
         var map: [Int: AnnotationColor] = [:]
         for a in annotations where a.kind == .highlight {
             if let loc = a.wordLocation,
                loc.paragraphIndex == paragraphIndex {
-                map[loc.wordIndex] = a.color
+                map[loc.wordIndex - chunkWordOffset] = a.color
             }
         }
         return map

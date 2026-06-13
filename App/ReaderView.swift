@@ -16,6 +16,11 @@ struct ReaderView: View {
     @State var engine = AudioEngine()
     @State var showAudioImporter = false
     @State var attachError: String?
+    /// One-shot alert when a SwiftData save fails. Annotation and progress
+    /// writes used `try?` — a persistent failure (disk full beside multi-GB
+    /// audiobooks) silently discarded highlights/notes/positions while the
+    /// UI confirmed them.
+    @State var persistError: String?
 
     @State var alignmentMap: AlignmentMap?
     /// Alignment progress + completion banner are sourced from the
@@ -43,18 +48,11 @@ struct ReaderView: View {
     @State var annotationRevision: Int = 0
 
     @AppStorage("inkandecho.paginated") var paginated: Bool = true
-    @AppStorage("inkandecho.wordHighlighting") var wordHighlightingEnabled: Bool = false
+    @AppStorage(AppSettings.wordHighlightingKey) var wordHighlightingEnabled: Bool = false
     @AppStorage(AppSettings.animationsEnabledKey) var animationsEnabled: Bool = true
     @State var currentPageIndex: Int = 0
-    @State var lastTurnedForward: Bool = true
     @State var sidebarTab: SidebarTab = .chapters
-    @State var useSpreadMode: Bool = true
     @FocusState var pageFocused: Bool
-
-    @State var measuredPageSize: CGSize = .zero
-    @State var isAnimatingTransition: Bool = false
-    @State var transitionProgress: Double = 0
-    @State var transitionDirection: DogEarPageTurn.Direction = .forward
 
     #if os(iOS)
     @State var iosSidebarVisible: Bool = false
@@ -65,9 +63,6 @@ struct ReaderView: View {
     /// alignment is running — the job will continue in the background
     /// either way, but the prompt is the only place the user learns that.
     @State var iosShowLeaveAlignmentConfirm: Bool = false
-    @State var iosDragProgress: Double = 0
-    @State var iosDragDirection: DogEarPageTurn.Direction = .forward
-    @State var iosDragActive: Bool = false
     /// iPhone ambient mode: when true, the header + audio bar slide off so
     /// the page is the only thing on screen. Tap the page to toggle.
     @State var iosChromeHidden: Bool = false
@@ -86,11 +81,13 @@ struct ReaderView: View {
     /// (PVC, audio bar, scroll view) on every word change during aligned
     /// audio playback.
     @State var activeWordTracker = ActiveWordTracker()
-    /// Read-along page-follow bookkeeping. `followDrivenPage` is the page the
+    /// Read-along page-follow bookkeeping. `drivenPage` is the page the
     /// narration-follow last set, so a `currentPageIndex` change to anything
-    /// else reads as a manual turn and suspends follow briefly.
-    @State var followDrivenPage: Int?
-    @State var followSuspendedUntil: Date?
+    /// else reads as a manual turn and suspends follow briefly. A plain class
+    /// in `@State` (same pattern as `wordLayoutCache`): nothing in `body`
+    /// reads these, so writes — which arrive per touch-move event from the
+    /// scroll-suspension gesture — must not invalidate the view tree.
+    @State var followState = FollowState()
     @State var activeScrollParagraph: Int?
     @State var lastProgressSaveAt: Date?
 
@@ -104,6 +101,13 @@ struct ReaderView: View {
     /// Every book word with its narration start time, flattened across all
     /// chapters and time-sorted. The read-along highlight binary-searches this.
     @State var denseWords: [DenseWord] = []
+    /// Memoized word→paragraph / word→page tables for the current chapter and
+    /// pagination budget. A plain class held in `@State` on purpose: refreshing
+    /// it is invisible to SwiftUI (it's a derived cache, not view state), so it
+    /// can rebuild during body evaluation — the DEBUG HUD consults it there —
+    /// without illegal state writes, and narration-follow can consult it per
+    /// word change without re-rendering the reader.
+    @State var wordLayoutCache = SegmentWordLayoutCache()
     /// True while `restoreProgress` is mid-flight. Suppresses the
     /// `selectedSegmentID → currentPageIndex = 0` reset so the restored
     /// page index survives the chapter assignment.
@@ -115,31 +119,17 @@ struct ReaderView: View {
     /// index. Recomputed on segments load and any size-class change.
     @State var flatPageBoundaries: [(segmentID: String, count: Int)] = []
     @State var flatBoundariesBudget: Int = 0
+    /// Whether the flat boundaries were paginated for a two-page spread.
+    /// This is the mode the curl is REALLY in — follow's spread-visibility
+    /// math keys off it rather than any layout-path-local flag.
+    @State var flatBoundariesUseSpread: Bool = false
 
     var body: some View {
         readerLayout
             .background(Theme.canvas)
             .navigationTitle(book.title)
-            .overlay(alignment: .top) {
-                #if DEBUG
-                ReadAlongDebugHUD(
-                    engine: engine,
-                    tracker: activeWordTracker,
-                    toggleOn: wordHighlightingEnabled,
-                    aligned: alignmentMap != nil,
-                    anchorCount: currentSegment.flatMap { anchorsBySegment[$0.id]?.count } ?? 0,
-                    paginatedActive: paginated && flatTotalPages > 0,
-                    currentPage: currentPageIndex,
-                    targetPageForActive: { wordIndex in
-                        guard let seg = currentSegment,
-                              let p = paragraphIndex(forWordIndex: wordIndex, in: seg) else { return nil }
-                        return pageIndex(forParagraph: p, in: seg)
-                    }
-                )
-                #endif
-            }
         .background {
-            // Engine ticks `currentTime` at 10 Hz; isolating the read
+            // Engine ticks `currentTime` at 30 Hz; isolating the read
             // here keeps it out of `ReaderView.body`, which would
             // otherwise become a dependent of `currentTime` and re-eval
             // the entire reader (breaking SwiftUI Menu state + gestures
@@ -150,14 +140,36 @@ struct ReaderView: View {
             }
         }
         .onChange(of: selectedSegmentID) { _, _ in
+            // This handler used to live on the long-dead `pageContent` view,
+            // which meant it never registered: the restore flag latched true
+            // forever (permanently disabling narration-follow) and chapter
+            // picks kept the previous chapter's page index, landing the
+            // reader mid-chapter and persisting that corrupted position.
+            if isRestoringProgress {
+                // Restore / narration-follow / cross-chapter curl set the
+                // index deliberately; consume the token and keep it.
+                isRestoringProgress = false
+            } else {
+                // User-driven chapter switch: start at the first page, and
+                // back narration-follow off briefly — same contract as a
+                // manual page turn, or follow would yank the user straight
+                // back to the narrated chapter.
+                currentPageIndex = 0
+                followState.suspendedUntil = Date().addingTimeInterval(4)
+            }
             refreshActiveWord()
             saveProgressIfNeeded(force: true)
         }
         .onChange(of: currentPageIndex) { _, newValue in
-            if newValue != followDrivenPage {
+            if newValue == followState.drivenPage {
+                // Our own narration-follow turn arriving. Consume the token so
+                // a later MANUAL turn onto this same page isn't mistaken for
+                // follow and left unsuspended.
+                followState.drivenPage = nil
+            } else {
                 // A turn we didn't drive — the user flipped the page. Back off
                 // narration-follow briefly so we don't yank them back.
-                followSuspendedUntil = Date().addingTimeInterval(4)
+                followState.suspendedUntil = Date().addingTimeInterval(4)
             }
             saveProgressIfNeeded(force: true)
         }
@@ -171,6 +183,10 @@ struct ReaderView: View {
         }
         .onDisappear {
             saveProgressIfNeeded(force: true)
+            // Each ReaderView owns its own engine, so audio left playing
+            // after the pop would overlap with the next book's engine.
+            // Listen-while-browsing needs a single shared engine first.
+            engine.pause()
         }
         .task(id: book.id) {
             await loadEverything()
@@ -196,6 +212,14 @@ struct ReaderView: View {
             Button("OK", role: .cancel) { alignment.dismissError() }
         } message: {
             Text(alignmentError ?? "")
+        }
+        .alert("Couldn't save", isPresented: Binding(
+            get: { persistError != nil },
+            set: { if !$0 { persistError = nil } }
+        )) {
+            Button("OK", role: .cancel) { persistError = nil }
+        } message: {
+            Text(persistError ?? "")
         }
         .alert(noteEditingExisting == nil ? "Add Note" : "Edit Note", isPresented: Binding(
             get: { noteAnchor != nil || noteEditingExisting != nil },
@@ -237,9 +261,7 @@ struct ReaderView: View {
                 book: book,
                 segments: segments,
                 onJump: { annotation in
-                    if let loc = annotation.paragraphLocation {
-                        selectedSegmentID = loc.segmentID
-                    }
+                    jump(to: annotation)
                     showAnnotationsSheet = false
                 },
                 onDismiss: { showAnnotationsSheet = false }
@@ -248,6 +270,45 @@ struct ReaderView: View {
     }
 
     // MARK: - Annotation helpers
+
+    /// Every annotation/progress write funnels through here. Saving with
+    /// `try?` meant a failing store silently discarded highlights, notes,
+    /// and positions while the UI confirmed them. One alert per failure
+    /// episode (`persistError` holds until dismissed).
+    func saveOrReport() {
+        do {
+            try modelContext.save()
+        } catch {
+            if persistError == nil {
+                persistError = error.localizedDescription
+            }
+        }
+    }
+
+    /// Jump the reader to an annotation's paragraph — chapter AND position.
+    /// Setting only the chapter landed cross-chapter jumps on page 0 and made
+    /// same-chapter jumps a silent no-op (the sheet just closed).
+    func jump(to annotation: Annotation) {
+        guard let loc = annotation.paragraphLocation,
+              let segment = segments.first(where: { $0.id == loc.segmentID }) else { return }
+        let layout = wordLayout(for: segment)
+        if loc.segmentID != selectedSegmentID {
+            // Suppress the chapter-change page reset for the same reason
+            // restoreProgress does: we're about to set the page deliberately.
+            isRestoringProgress = true
+            selectedSegmentID = loc.segmentID
+        }
+        if paginated {
+            if let word = layout.firstWord(ofParagraph: loc.paragraphIndex),
+               let page = layout.pageIndex(forWord: word) {
+                currentPageIndex = page
+            } else {
+                currentPageIndex = 0
+            }
+        } else {
+            activeScrollParagraph = loc.paragraphIndex
+        }
+    }
 
     /// Annotations that should render on a given paragraph. Includes both
     /// paragraph-level (`<seg>#p<n>`) and word-level (`<seg>#p<n>w<m>`)
@@ -279,7 +340,7 @@ struct ReaderView: View {
             )
             insertAnnotation(annotation)
         }
-        try? modelContext.save()
+        saveOrReport()
         annotationRevision &+= 1
     }
 
@@ -296,7 +357,7 @@ struct ReaderView: View {
             )
             insertAnnotation(annotation)
         }
-        try? modelContext.save()
+        saveOrReport()
         annotationRevision &+= 1
     }
 
@@ -336,7 +397,7 @@ struct ReaderView: View {
                 color: AppSettings.defaultHighlightColor()
             ))
         }
-        try? modelContext.save()
+        saveOrReport()
         annotationRevision &+= 1
     }
 
@@ -359,8 +420,12 @@ struct ReaderView: View {
             kind: .highlight,
             color: AppSettings.defaultHighlightColor()
         ))
-        try? modelContext.save()
-        annotationRevision &+= 1
+        saveOrReport()
+        // No annotationRevision bump here: paint fires mid-drag, and the
+        // bump re-identifies the page-curl container, destroying the text
+        // view under the user's finger. The row's `onPaintEnded` bumps once
+        // when the gesture finishes; live feedback during the drag comes
+        // from the text view's transient tint.
     }
 
     func saveNote() {
@@ -387,7 +452,7 @@ struct ReaderView: View {
             )
             insertAnnotation(annotation)
         }
-        try? modelContext.save()
+        saveOrReport()
         annotationRevision &+= 1
     }
 
@@ -410,7 +475,7 @@ struct ReaderView: View {
                 }
                 Button(role: .destructive) {
                     modelContext.delete(annotation)
-                    try? modelContext.save()
+                    saveOrReport()
                     annotationRevision &+= 1
                     viewingNote = nil
                 } label: {
@@ -431,28 +496,6 @@ struct ReaderView: View {
 
     var readerLayout: some View {
         iosReaderLayout
-    }
-
-    var mainColumn: some View {
-        VStack(spacing: 0) {
-            pageContent
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-            if alignmentRunning {
-                alignmentBanner
-            } else if let toast = alignmentToast {
-                alignmentToastBanner(toast)
-            }
-            if book.audiobookFileURL != nil {
-                AudioBarView(
-                    engine: engine,
-                    onAlign: { runAlignment() },
-                    alignmentEnabled: !alignmentRunning,
-                    alignmentExists: alignmentMap != nil
-                )
-            } else {
-                attachAudiobookBar
-            }
-        }
     }
 
     // MARK: - Sidebar
@@ -650,7 +693,7 @@ struct ReaderView: View {
     }
 
     func sortedAnnotationsForSidebar(kind: AnnotationKind) -> [Annotation] {
-        let segmentOrder = Dictionary(uniqueKeysWithValues: segments.enumerated().map { ($0.element.id, $0.offset) })
+        let segmentOrder = Dictionary(segments.enumerated().map { ($0.element.id, $0.offset) }, uniquingKeysWith: { first, _ in first })
         return book.annotations
             .filter { $0.kind == kind }
             .sorted { a, b in
@@ -734,33 +777,6 @@ struct ReaderView: View {
 
     // MARK: - Page
 
-    var pageContent: some View {
-        Group {
-            if loadingSegments {
-                ProgressView().padding(.top, 80)
-            } else if let loadError {
-                Text(loadError).font(.callout).foregroundStyle(.red).padding()
-            } else if !segments.isEmpty, paginated, flatTotalPages > 0 {
-                if let segment = currentSegment {
-                    paginatedView(segment: segment)
-                }
-            } else if let segment = currentSegment {
-                scrollView(segment: segment)
-            } else {
-                Text("Empty chapter").foregroundStyle(Theme.inkMuted).padding()
-            }
-        }
-        .frame(maxWidth: .infinity)
-        .background(Theme.canvas)
-        .onChange(of: selectedSegmentID) { _, _ in
-            if isRestoringProgress {
-                isRestoringProgress = false
-            } else {
-                currentPageIndex = 0
-            }
-        }
-    }
-
     @ViewBuilder
     func scrollView(segment: TextSegment) -> some View {
         ScrollView {
@@ -786,272 +802,18 @@ struct ReaderView: View {
                 }
             }
         }
-    }
-
-    /// Threshold below which the reader collapses from two-page spread to a
-    /// single page. Below this each half would be too narrow to read the
-    /// 16pt serif body comfortably.
-    static let spreadModeMinWidth: CGFloat = 720
-
-    func paginatedView(segment: TextSegment) -> some View {
-        return GeometryReader { geo in
-            let useSpread = geo.size.width >= Self.spreadModeMinWidth
-            let wordsPerPage = wordsBudget(useSpread: useSpread)
-            let pages = pageBreaks(for: segment.text, wordsPerPage: wordsPerPage)
-            let halfWidth = max(0, (geo.size.width - 1) / 2)
-            let safeIndex = pages.isEmpty ? 0 : max(0, min(currentPageIndex, pages.count - 1))
-            let displayLeft = useSpread
-                ? normalizedLeftIndex(safeIndex, pageCount: pages.count)
-                : safeIndex
-
-            ZStack(alignment: .topLeading) {
-                if useSpread {
-                    HStack(spacing: 0) {
-                        spreadHalf(
-                            pages: pages,
-                            pageIndex: displayLeft,
-                            side: .left,
-                            segment: segment,
-                            halfWidth: halfWidth,
-                            height: geo.size.height
-                        )
-                        spineSeparator(height: geo.size.height)
-                        spreadHalf(
-                            pages: pages,
-                            pageIndex: displayLeft + 1,
-                            side: .right,
-                            segment: segment,
-                            halfWidth: halfWidth,
-                            height: geo.size.height
-                        )
-                    }
-                    .frame(width: geo.size.width, height: geo.size.height)
-                } else {
-                    Group {
-                        if pages.indices.contains(safeIndex) {
-                            pageSurface(segment: segment, page: pages[safeIndex], pageIndex: safeIndex)
-                        } else {
-                            Color.clear
-                        }
-                    }
-                    .frame(width: geo.size.width, height: geo.size.height)
-                }
-
-                // Dog-ear sits at the top of the ZStack so its flap can
-                // extend past any sibling layer (spine in spread mode,
-                // neighbouring page) without being covered.
-                if let activeProgress = activeDogEarProgress {
-                    DogEarPageTurn(
-                        progress: activeProgress.progress,
-                        direction: activeProgress.direction,
-                        colorScheme: colorScheme
-                    )
-                    .frame(
-                        width: useSpread ? halfWidth : geo.size.width,
-                        height: geo.size.height
-                    )
-                    .offset(
-                        x: useSpread && activeProgress.direction == .forward ? halfWidth + 1 : 0,
-                        y: 0
-                    )
-                    .allowsHitTesting(false)
-                }
+        // Scroll mode's analogue of the manual page turn: any touch-drag means
+        // the user took the wheel, so back narration-follow off briefly instead
+        // of re-centering the narrated paragraph mid-scroll. `simultaneous` so
+        // it observes the scroll without competing with it.
+        .simultaneousGesture(
+            DragGesture().onChanged { _ in
+                followState.suspendedUntil = Date().addingTimeInterval(4)
             }
-            .frame(width: geo.size.width, height: geo.size.height)
-            .background(Theme.canvas)
-            .clipShape(RoundedRectangle(cornerRadius: 6))
-            .overlay(
-                RoundedRectangle(cornerRadius: 6)
-                    .stroke(Theme.hairline, lineWidth: 1)
-            )
-            .shadow(color: Color.black.opacity(0.18), radius: 14, x: 0, y: 6)
-            .onAppear {
-                measuredPageSize = useSpread
-                    ? CGSize(width: halfWidth, height: geo.size.height)
-                    : CGSize(width: geo.size.width, height: geo.size.height)
-                useSpreadMode = useSpread
-            }
-            .onChange(of: geo.size) { _, _ in
-                measuredPageSize = useSpread
-                    ? CGSize(width: halfWidth, height: geo.size.height)
-                    : CGSize(width: geo.size.width, height: geo.size.height)
-                useSpreadMode = useSpread
-            }
-        }
-        .padding(.horizontal, paginatedHorizontalPadding)
-        .padding(.vertical, paginatedVerticalPadding)
-        .background(Theme.canvasCool)
-        .focusable()
-        .focused($pageFocused)
-        .onAppear { pageFocused = true }
-        .onKeyPress(.leftArrow) {
-            advancePage(by: -1, segment: segment)
-            return .handled
-        }
-        .onKeyPress(.rightArrow) {
-            advancePage(by: 1, segment: segment)
-            return .handled
-        }
-        .onKeyPress(.space) {
-            advancePage(by: 1, segment: segment)
-            return .handled
-        }
-        #if os(iOS)
-        .gesture(pageTurnDragGesture(for: segment))
-        #endif
-    }
-
-    /// Reader page padding. iOS gets less canvas-cool gutter so the page
-    /// itself can dominate the screen; macOS keeps the windowed feel.
-    var paginatedHorizontalPadding: CGFloat {
-        #if os(iOS)
-        return horizontalSizeClass == .compact ? 0 : 16
-        #else
-        return 32
-        #endif
-    }
-
-    var paginatedVerticalPadding: CGFloat {
-        #if os(iOS)
-        return horizontalSizeClass == .compact ? 0 : 16
-        #else
-        return 24
-        #endif
-    }
-
-    #if os(iOS)
-    /// Drives the dog-ear curl from a horizontal drag. Drag left to peel
-    /// from the top-right (advance forward), drag right to peel from the
-    /// top-left (go back). Releasing past the commit threshold animates
-    /// the rest of the turn; releasing short cancels by easing back to 0.
-    func pageTurnDragGesture(for segment: TextSegment) -> some Gesture {
-        DragGesture(minimumDistance: 12, coordinateSpace: .local)
-            .onChanged { value in
-                guard !isAnimatingTransition else { return }
-                let width = max(measuredPageSize.width, 1)
-                let dx = value.translation.width
-                let direction: DogEarPageTurn.Direction = dx < 0 ? .forward : .backward
-                if !iosDragActive {
-                    iosDragActive = true
-                    iosDragDirection = direction
-                } else if direction != iosDragDirection {
-                    // Switched directions mid-drag — re-anchor so the curl
-                    // reflects the new intent without snapping.
-                    iosDragDirection = direction
-                }
-                let normalized = min(1.0, abs(dx) / (width * 0.6))
-                iosDragProgress = Double(normalized)
-            }
-            .onEnded { value in
-                guard iosDragActive else { return }
-                let commit = iosDragProgress > 0.4
-                let direction = iosDragDirection
-                iosDragActive = false
-                if commit {
-                    // Reset progress immediately and let `turnPage` drive
-                    // its own commit animation.
-                    iosDragProgress = 0
-                    advancePage(by: direction == .forward ? 1 : -1, segment: segment)
-                } else {
-                    withAnimation(.easeOut(duration: 0.22)) {
-                        iosDragProgress = 0
-                    }
-                }
-            }
-    }
-    #endif
-
-    /// Advance forward (`direction = +1`) or backward (`-1`) by one page or
-    /// one spread depending on `useSpreadMode`. Recomputes pages with the
-    /// mode's word budget so a forward press always moves to the next
-    /// "screen worth" of text. When the reader is on the last page of the
-    /// current chapter, a forward swipe / arrow-key crosses into the next
-    /// chapter (page 0); a backward swipe at page 0 jumps to the last page
-    /// of the previous chapter — no detour through the chapter list.
-    func advancePage(by direction: Int, segment: TextSegment) {
-        let wordsPerPage = wordsBudget(useSpread: useSpreadMode)
-        let pages = pageBreaks(for: segment.text, wordsPerPage: wordsPerPage)
-        let step = useSpreadMode ? 2 : 1
-        let target = currentPageIndex + direction * step
-
-        if direction > 0 {
-            let lastValidLeft = useSpreadMode
-                ? normalizedLeftIndex(max(0, pages.count - 1), pageCount: pages.count)
-                : max(0, pages.count - 1)
-            if target > lastValidLeft {
-                crossToAdjacentChapter(forward: true, from: segment)
-                return
-            }
-        } else if direction < 0 {
-            if target < 0 {
-                crossToAdjacentChapter(forward: false, from: segment)
-                return
-            }
-        }
-
-        turnPage(
-            to: target,
-            totalPages: pages.count,
-            useSpread: useSpreadMode,
-            pages: pages,
-            segment: segment
         )
     }
 
-    /// Jump to the adjacent chapter and land on the right edge of its page
-    /// range so the read order is preserved. Forward → next chapter, page 0.
-    /// Backward → previous chapter, last page (or last spread-left in spread
-    /// mode). Does nothing at the spine ends. Suppresses the chapter-change
-    /// page-reset via `isRestoringProgress` so the landing page index sticks.
-    private func crossToAdjacentChapter(forward: Bool, from segment: TextSegment) {
-        guard let idx = segments.firstIndex(where: { $0.id == segment.id }) else { return }
-        let nextIdx = forward ? idx + 1 : idx - 1
-        guard nextIdx >= 0, nextIdx < segments.count else { return }
-        let newSegment = segments[nextIdx]
 
-        let landingPage: Int
-        if forward {
-            landingPage = 0
-        } else {
-            let newPages = pageBreaks(
-                for: newSegment.text,
-                wordsPerPage: wordsBudget(useSpread: useSpreadMode)
-            )
-            if useSpreadMode {
-                landingPage = normalizedLeftIndex(max(0, newPages.count - 1), pageCount: newPages.count)
-            } else {
-                landingPage = max(0, newPages.count - 1)
-            }
-        }
-
-        lastTurnedForward = forward
-        isRestoringProgress = true
-        selectedSegmentID = newSegment.id
-        currentPageIndex = landingPage
-    }
-
-    /// Renders one half of the spread: just the live `pageSurface`. The
-    /// dog-ear page-turn overlay is mounted at the spread level (see
-    /// `paginatedView`) so it can extend past the spine without being
-    /// covered by sibling layers.
-    @ViewBuilder
-    func spreadHalf(
-        pages: [PageContent],
-        pageIndex: Int,
-        side: PageSide,
-        segment: TextSegment,
-        halfWidth: CGFloat,
-        height: CGFloat
-    ) -> some View {
-        Group {
-            if pages.indices.contains(pageIndex) {
-                pageSurface(segment: segment, page: pages[pageIndex], pageIndex: pageIndex)
-            } else {
-                Color.clear
-            }
-        }
-        .frame(width: halfWidth, height: height)
-    }
 
     /// One page of the spread: chapter running header, body paragraphs,
     /// page-number footer. No background or border — those sit on the
@@ -1138,117 +900,6 @@ struct ReaderView: View {
         #endif
     }
 
-    enum PageSide {
-        case left
-        case right
-    }
-
-    /// Spine between the two pages of a spread. A 1pt hairline plus a soft
-    /// highlight on its left and a feathered shadow on its right gives the
-    /// spread a paper-indent feel rather than a flat divider.
-    func spineSeparator(height: CGFloat) -> some View {
-        let highlight = Color.white.opacity(0.5)
-        let shadow = Color(red: 31/255, green: 26/255, blue: 20/255).opacity(0.12)
-        return ZStack(alignment: .center) {
-            // Feathered shadow on the right of the spine.
-            LinearGradient(
-                stops: [
-                    .init(color: shadow, location: 0.0),
-                    .init(color: .clear, location: 1.0),
-                ],
-                startPoint: .leading,
-                endPoint: .trailing
-            )
-            .frame(width: 4)
-            .offset(x: 2.5)
-            // Highlight on the left of the spine.
-            LinearGradient(
-                stops: [
-                    .init(color: .clear, location: 0.0),
-                    .init(color: highlight, location: 1.0),
-                ],
-                startPoint: .leading,
-                endPoint: .trailing
-            )
-            .frame(width: 2)
-            .offset(x: -1.5)
-            // The spine itself.
-            Rectangle()
-                .fill(Theme.hairlineStrong.opacity(0.45))
-                .frame(width: 1)
-        }
-        .frame(width: 1, height: height)
-        .allowsHitTesting(false)
-    }
-
-    /// Round any saved/restored `currentPageIndex` down to an even number so
-    /// the displayed spread always begins on a left page. If `pageCount` is
-    /// 0, returns 0.
-    func normalizedLeftIndex(_ raw: Int, pageCount: Int) -> Int {
-        guard pageCount > 0 else { return 0 }
-        let bounded = max(0, min(raw, pageCount - 1))
-        return bounded - (bounded % 2)
-    }
-
-    func turnPage(to newIndex: Int, totalPages: Int, useSpread: Bool = true, pages: [PageContent] = [], segment: TextSegment? = nil) {
-        let oldLeft: Int
-        let newLeft: Int
-        if useSpread {
-            oldLeft = normalizedLeftIndex(currentPageIndex, pageCount: totalPages)
-            newLeft = normalizedLeftIndex(newIndex, pageCount: totalPages)
-        } else {
-            guard totalPages > 0 else { return }
-            oldLeft = max(0, min(currentPageIndex, totalPages - 1))
-            newLeft = max(0, min(newIndex, totalPages - 1))
-        }
-        guard newLeft != oldLeft else { return }
-        lastTurnedForward = newLeft > oldLeft
-
-        if animationsEnabled,
-           !isAnimatingTransition,
-           measuredPageSize.width > 100, measuredPageSize.height > 100 {
-            transitionDirection = lastTurnedForward ? .forward : .backward
-            transitionProgress = 0
-            isAnimatingTransition = true
-
-            Task { @MainActor in
-                let totalDuration: TimeInterval = 0.7
-                let frameInterval: TimeInterval = 1.0 / 60.0
-                let start = Date()
-                while true {
-                    let elapsed = Date().timeIntervalSince(start)
-                    let raw = min(1.0, elapsed / totalDuration)
-                    let eased = raw < 0.5
-                        ? 4 * raw * raw * raw
-                        : 1 - pow(-2 * raw + 2, 3) / 2
-                    transitionProgress = eased
-                    if raw >= 1.0 { break }
-                    try? await Task.sleep(nanoseconds: UInt64(frameInterval * 1_000_000_000))
-                }
-                currentPageIndex = newLeft
-                isAnimatingTransition = false
-            }
-            return
-        }
-
-        currentPageIndex = newLeft
-    }
-
-    /// What the dog-ear overlay should currently render. The reader can be
-    /// running its built-in 0.7s commit animation OR (on iPhone) tracking a
-    /// finger drag from the page corner. Returns `nil` when neither is live.
-    var activeDogEarProgress: (progress: Double, direction: DogEarPageTurn.Direction)? {
-        if isAnimatingTransition {
-            return (transitionProgress, transitionDirection)
-        }
-        #if os(iOS)
-        if iosDragActive {
-            return (iosDragProgress, iosDragDirection)
-        }
-        #endif
-        return nil
-    }
-
     @ViewBuilder
     func chapterHeader(for segment: TextSegment) -> some View {
         Text(displayChapterLabel(for: segment))
@@ -1260,7 +911,14 @@ struct ReaderView: View {
 
     @ViewBuilder
     func paragraphRow(text: String, segmentID: String, paragraphIndex: Int, chunkWordOffset: Int = 0) -> some View {
-        let paragraphTexts = currentSegment.map { paragraphs(of: $0.text) } ?? []
+        // Offsets must come from the segment this row RENDERS, not the
+        // selected one: the page-curl prefetches the adjacent chapter's
+        // page while `selectedSegmentID` still points at the old chapter,
+        // and offsets summed over the wrong chapter's paragraphs broke
+        // read-along highlighting and tap-to-seek on every chapter's
+        // entry page.
+        let rowSegment = segments.first(where: { $0.id == segmentID })
+        let paragraphTexts = rowSegment.map { paragraphs(of: $0.text) } ?? []
         let paragraphWordOffset = wordOffsetForParagraph(paragraphIndex, paragraphs: paragraphTexts)
         // For split paragraphs the displayed text is a chunk; word indices
         // need to count from the chunk's start, not the paragraph's.
@@ -1270,6 +928,7 @@ struct ReaderView: View {
             text: text,
             paragraphIndex: paragraphIndex,
             wordOffset: wordOffset,
+            chunkWordOffset: chunkWordOffset,
             seekEnabled: alignmentMap != nil,
             segmentID: segmentID,
             activeWordTracker: activeWordTracker,
@@ -1294,22 +953,34 @@ struct ReaderView: View {
             },
             onDelete: { annotation in
                 modelContext.delete(annotation)
-                try? modelContext.save()
+                saveOrReport()
                 annotationRevision &+= 1
             },
+            // Word-highlight locators are PARAGRAPH-relative. The row hands
+            // back chunk-local indices, so add the chunk offset before
+            // storing — without it a highlight painted in chunk 2 of a split
+            // paragraph persisted under the wrong word and lit up the same
+            // ordinal in every chunk.
             onToggleWord: { localWordIdx in
                 toggleWordHighlight(
                     segmentID: segmentID,
                     paragraphIndex: paragraphIndex,
-                    wordIndex: localWordIdx
+                    wordIndex: chunkWordOffset + localWordIdx
                 )
             },
             onPaintWord: { localWordIdx in
                 paintWordHighlight(
                     segmentID: segmentID,
                     paragraphIndex: paragraphIndex,
-                    wordIndex: localWordIdx
+                    wordIndex: chunkWordOffset + localWordIdx
                 )
+            },
+            onPaintEnded: {
+                // One canonical re-render per completed paint gesture. Doing
+                // this per painted word changed the curl container's `.id`
+                // mid-touch, tearing down the very text view the finger was
+                // dragging in.
+                annotationRevision &+= 1
             }
         )
     }
@@ -1320,6 +991,19 @@ struct ReaderView: View {
             return
         }
         let globalIdx = wordOffset + localIndex
+
+        // Dense per-word times (the same data the read-along highlight uses)
+        // give the tapped word its own start. Falls through to the sparse
+        // nearest-anchor path only for pre-dense maps.
+        if let start = denseStart(segmentID: segmentID, wordIndex: globalIdx, map: map) {
+            engine.seek(to: start)
+            do {
+                try engine.play()
+            } catch {
+                attachError = "Play failed after seek: \(error.localizedDescription)"
+            }
+            return
+        }
 
         let anchor: WordAnchor
         let segWords = map.words.filter { $0.segmentId == segmentID }
@@ -1354,6 +1038,28 @@ struct ReaderView: View {
         }
     }
 
+    /// Narration start time of a specific book word, from the dense
+    /// per-word table. `wordIndices` is ascending within a chapter, so
+    /// binary-search the largest entry ≤ the requested index (punctuation
+    /// tokens are absent from the table; the preceding word is the right
+    /// listen-from point for them).
+    private func denseStart(segmentID: String, wordIndex: Int, map: AlignmentMap) -> Double? {
+        guard let seg = map.wordTimes.first(where: { $0.segmentId == segmentID }),
+              !seg.wordIndices.isEmpty, seg.wordIndices.count == seg.starts.count,
+              wordIndex >= seg.wordIndices[0] else { return nil }
+        var lo = 0, hi = seg.wordIndices.count - 1, best = 0
+        while lo <= hi {
+            let mid = (lo + hi) / 2
+            if seg.wordIndices[mid] <= wordIndex {
+                best = mid
+                lo = mid + 1
+            } else {
+                hi = mid - 1
+            }
+        }
+        return max(0, seg.starts[best])
+    }
+
     func nearestAnchorAcrossSegments(targetSegmentID: String, map: AlignmentMap) -> WordAnchor? {
         guard let targetIndex = segments.firstIndex(where: { $0.id == targetSegmentID }) else {
             return nil
@@ -1362,7 +1068,9 @@ struct ReaderView: View {
 
         // Spiral outward: try preceding chapters first (more useful — gives the
         // user the LAST anchor before their click), then following chapters.
+        // Single-chapter books make maxRadius 0, and `1...0` traps.
         let maxRadius = max(targetIndex, segments.count - targetIndex - 1)
+        guard maxRadius >= 1 else { return nil }
         for offset in 1...maxRadius {
             for direction in [-1, 1] {
                 let idx = targetIndex + direction * offset
@@ -1389,34 +1097,45 @@ struct ReaderView: View {
         return offset
     }
 
-    func tokenizeWords(_ text: String) -> [String] {
-        text.components(separatedBy: .whitespacesAndNewlines).filter { !$0.isEmpty }
+    /// Lookup tables behind `paragraphIndex(forWordIndex:)` and
+    /// `pageIndex(forWordIndex:)`, rebuilt only when the chapter or the flat
+    /// pagination budget changes. Both lookups run per narrated-word change
+    /// (and the DEBUG HUD's at 30 Hz) — re-tokenizing and re-paginating the
+    /// whole chapter each call is exactly the main-thread stall the 10 Hz
+    /// tick cap used to paper over.
+    private func wordLayout(for segment: TextSegment) -> SegmentWordLayoutCache {
+        let budget = flatBoundariesBudget > 0 ? flatBoundariesBudget : wordsBudget(useSpread: flatBoundariesUseSpread)
+        let key = "\(segment.id)|\(budget)|\(segment.text.count)"
+        if wordLayoutCache.key != key {
+            let paras = paragraphs(of: segment.text)
+            var paragraphStarts: [Int] = []
+            paragraphStarts.reserveCapacity(paras.count)
+            var cumulative = 0
+            for para in paras {
+                paragraphStarts.append(cumulative)
+                cumulative += tokenizeWords(para).count
+            }
+            let pageStarts = pageBreaks(for: segment.text, wordsPerPage: budget).map { page in
+                page.paragraphs.first.map { paragraphStarts[$0.originalIndex] + $0.wordOffsetWithinParagraph } ?? 0
+            }
+            wordLayoutCache.update(key: key, paragraphStarts: paragraphStarts, pageStarts: pageStarts)
+        }
+        return wordLayoutCache
     }
 
     /// Original-paragraph index (within the chapter) holding the chapter-global
-    /// word `wordIndex`. Counts with `tokenizeWords` so it matches the offsets
+    /// word `wordIndex`. Counted with `tokenizeWords` so it matches the offsets
     /// the highlight itself is keyed on.
     func paragraphIndex(forWordIndex wordIndex: Int, in segment: TextSegment) -> Int? {
-        let paras = paragraphs(of: segment.text)
-        guard !paras.isEmpty else { return nil }
-        var cumulative = 0
-        for (i, para) in paras.enumerated() {
-            cumulative += tokenizeWords(para).count
-            if wordIndex < cumulative { return i }
-        }
-        return paras.count - 1
+        wordLayout(for: segment).paragraphIndex(forWord: wordIndex)
     }
 
-    /// The flat-pagination page that renders original paragraph `paraIdx`. Uses
-    /// `flatBoundariesBudget` so the index lines up with the page-curl's flat
-    /// sequence (the same budget `iosBuildPage` paginates with).
-    func pageIndex(forParagraph paraIdx: Int, in segment: TextSegment) -> Int? {
-        let budget = flatBoundariesBudget > 0 ? flatBoundariesBudget : wordsBudget(useSpread: useSpreadMode)
-        for page in pageBreaks(for: segment.text, wordsPerPage: budget)
-        where page.paragraphs.contains(where: { $0.originalIndex == paraIdx }) {
-            return page.index
-        }
-        return nil
+    /// The flat-pagination page whose word range contains the chapter-global
+    /// `wordIndex`, at the budget the page-curl's flat sequence paginates with.
+    /// Word-exact: a long paragraph split across pages resolves to the page
+    /// holding the word's own chunk, not the paragraph's first page.
+    func pageIndex(forWordIndex wordIndex: Int, in segment: TextSegment) -> Int? {
+        wordLayout(for: segment).pageIndex(forWord: wordIndex)
     }
 
     /// Keep the narrated word on screen while audio plays. Paginated: snap the
@@ -1425,21 +1144,46 @@ struct ReaderView: View {
     func followNarration() {
         #if os(iOS)
         guard wordHighlightingEnabled, engine.state == .playing else { return }
-        guard !isAnimatingTransition, !iosDragActive, !isRestoringProgress else { return }
-        if let until = followSuspendedUntil, Date() < until { return }
+        guard !isRestoringProgress else { return }
+        if let until = followState.suspendedUntil, Date() < until { return }
         guard let aw = activeWordTracker.current,
-              let segment = currentSegment,
-              aw.segmentId == segment.id,
-              let paraIdx = paragraphIndex(forWordIndex: aw.wordIndex, in: segment) else { return }
+              let segment = currentSegment else { return }
+
+        // Narration crossed into another chapter (`denseWords` is global, so
+        // the active word already knows which one). Drive the chapter switch
+        // the same way restore does — flag-suppressed so the chapter-change
+        // handler doesn't reset the page we're about to set.
+        if aw.segmentId != segment.id {
+            guard let target = segments.first(where: { $0.id == aw.segmentId }) else { return }
+            isRestoringProgress = true
+            if paginated, flatTotalPages > 0 {
+                let page = pageIndex(forWordIndex: aw.wordIndex, in: target) ?? 0
+                followState.drivenPage = page
+                selectedSegmentID = target.id
+                currentPageIndex = page
+            } else {
+                selectedSegmentID = target.id
+                activeScrollParagraph = paragraphIndex(forWordIndex: aw.wordIndex, in: target)
+            }
+            return
+        }
 
         if paginated, flatTotalPages > 0 {
-            guard let targetPage = pageIndex(forParagraph: paraIdx, in: segment) else { return }
-            let left = (currentPageIndex / 2) * 2
-            let visible: Set<Int> = useSpreadMode ? [left, left + 1] : [currentPageIndex]
-            guard !visible.contains(targetPage) else { return }
-            followDrivenPage = targetPage
+            guard let targetPage = pageIndex(forWordIndex: aw.wordIndex, in: segment) else { return }
+            // Visibility is judged in the flat-global space the curl paginates
+            // in — it pairs spreads as (global/2)*2, so a chapter starting on
+            // an odd global page makes chapter-local pairing misjudge what's
+            // actually on screen. `flatBoundariesUseSpread` is the mode the
+            // flat sequence was actually built with — the curl's reality —
+            // not a stale layout-path flag.
+            let currentGlobal = flatGlobalIndex(segmentID: segment.id, pageIdx: currentPageIndex)
+            let targetGlobal = flatGlobalIndex(segmentID: segment.id, pageIdx: targetPage)
+            let left = (currentGlobal / 2) * 2
+            let visible: Set<Int> = flatBoundariesUseSpread ? [left, left + 1] : [currentGlobal]
+            guard !visible.contains(targetGlobal) else { return }
+            followState.drivenPage = targetPage
             currentPageIndex = targetPage
-        } else {
+        } else if let paraIdx = paragraphIndex(forWordIndex: aw.wordIndex, in: segment) {
             activeScrollParagraph = paraIdx
         }
         #endif
@@ -1453,6 +1197,12 @@ struct ReaderView: View {
         // Subtract output latency (scaled by rate) so the highlight matches what
         // is audible, not the latest rendered sample.
         let t = max(0, engine.currentTime - engine.outputLatency * Double(engine.rate))
+        // Pre-roll (intro music, narrator credits): nothing is being read yet,
+        // so highlight nothing rather than pinning the book's first word.
+        guard t >= denseWords[0].start else {
+            if activeWordTracker.current != nil { activeWordTracker.current = nil }
+            return
+        }
         let dw = denseWords[denseWordIndex(forTime: t)]
         let changed = dw.wordIndex != activeWordTracker.current?.wordIndex
             || dw.segmentId != activeWordTracker.current?.segmentId
@@ -1738,10 +1488,17 @@ struct ReaderView: View {
 
     func loadEverything() async {
         await loadSegments()
+        // Boundaries are computed immediately after segments land, BEFORE the
+        // audio-load suspension point. The old tail-call position ran after
+        // `engine.load` resumed, by which time `iosPageContent`'s `.task` had
+        // already recomputed with the real spread mode — and the tail call
+        // (default `useSpread: false`) clobbered it, paginating iPad/Catalyst
+        // landscape spreads at the single-page word budget (clipped pages).
+        // In this order, the view-side task always runs after and wins.
+        recomputeFlatPageBoundaries()
         await loadAudioIfPresent()
         loadAlignmentIfPresent()
         restoreProgress()
-        recomputeFlatPageBoundaries()
     }
 
     /// Walk every chapter and cache its page count at the active word
@@ -1751,6 +1508,17 @@ struct ReaderView: View {
     /// gap or reload — the iBooks continuous reading model.
     func recomputeFlatPageBoundaries(useSpread: Bool = false) {
         let budget = wordsBudget(useSpread: useSpread)
+        // Page indices don't survive a budget change — carry the position
+        // across as the current page's first WORD and remap it under the new
+        // budget below. This keeps the reading position stable through
+        // rotation / spread flips (and through the restore→spread-recompute
+        // sequence on open).
+        var anchorWord: Int?
+        if budget != flatBoundariesBudget, flatBoundariesBudget > 0,
+           paginated, let segment = currentSegment {
+            anchorWord = wordLayout(for: segment).startWord(ofPage: currentPageIndex)
+        }
+
         var result: [(String, Int)] = []
         for segment in segments {
             let pages = pageBreaks(for: segment.text, wordsPerPage: budget)
@@ -1758,6 +1526,12 @@ struct ReaderView: View {
         }
         flatPageBoundaries = result
         flatBoundariesBudget = budget
+        flatBoundariesUseSpread = useSpread
+
+        if let word = anchorWord, let segment = currentSegment,
+           let page = pageIndex(forWordIndex: word, in: segment) {
+            currentPageIndex = page
+        }
     }
 
     /// Total flat page count across every chapter at the current budget.
@@ -1816,8 +1590,8 @@ struct ReaderView: View {
             // load is wasteful, so only write when the slot is empty
             // AND the freshly-parsed EPUB produced cover bytes.
             if book.coverImageData == nil, let cover = imported.coverImageData {
-                book.coverImageData = cover
-                try? modelContext.save()
+                book.coverImageData = downsampledCoverData(cover)
+                saveOrReport()
             }
         } catch {
             loadError = error.localizedDescription
@@ -1830,13 +1604,22 @@ struct ReaderView: View {
         consolidateProgressRowsIfNeeded()
         if let progress = book.progress,
            !progress.currentCFI.isEmpty,
-           segments.contains(where: { $0.id == progress.currentCFI }) {
+           let segment = segments.first(where: { $0.id == progress.currentCFI }) {
             // Suppress the chapter-change page reset for this one assignment
             // so the saved page index survives. The flag clears on the next
             // selectedSegmentID change handler.
             isRestoringProgress = true
             selectedSegmentID = progress.currentCFI
-            currentPageIndex = max(0, progress.currentPageIndex)
+            // Prefer the word anchor: a raw page index is only meaningful at
+            // the budget it was saved under, so restoring it after an
+            // orientation / size-class change landed chapters away from the
+            // true position. -1 = pre-V2 row or scroll mode; use the index.
+            if progress.firstWordIndex >= 0,
+               let page = pageIndex(forWordIndex: progress.firstWordIndex, in: segment) {
+                currentPageIndex = page
+            } else {
+                currentPageIndex = max(0, progress.currentPageIndex)
+            }
             if progress.currentAudioSeconds > 0 {
                 engine.seek(to: progress.currentAudioSeconds)
             }
@@ -1868,7 +1651,7 @@ struct ReaderView: View {
             modelContext.delete(extra)
         }
         book.progress = keep
-        try? modelContext.save()
+        saveOrReport()
     }
 
     func saveProgressIfNeeded(force: Bool = false) {
@@ -1899,8 +1682,15 @@ struct ReaderView: View {
         progress.currentCFI = segmentID
         progress.currentAudioSeconds = engine.currentTime
         progress.currentPageIndex = currentPageIndex
+        // Budget-independent anchor (see ReadingProgress.firstWordIndex).
+        if paginated, let segment = currentSegment,
+           let word = wordLayout(for: segment).startWord(ofPage: currentPageIndex) {
+            progress.firstWordIndex = word
+        } else {
+            progress.firstWordIndex = -1
+        }
         progress.lastReadAt = .now
-        try? modelContext.save()
+        saveOrReport()
         lastProgressSaveAt = .now
     }
 
@@ -1908,6 +1698,11 @@ struct ReaderView: View {
         guard let url = book.resolvedAudiobookURL else { return }
         do {
             try await engine.load(url: url)
+            engine.setNowPlayingMetadata(
+                title: book.title,
+                artist: book.author,
+                artworkData: book.coverImageData
+            )
         } catch {
             attachError = "Failed to load audio: \(error.localizedDescription)"
         }
@@ -2066,6 +1861,11 @@ struct ReaderView: View {
                     rebuildAnchorIndex()
                     if let stored = book.resolvedAudiobookURL {
                         try await engine.load(url: stored)
+                        engine.setNowPlayingMetadata(
+                            title: book.title,
+                            artist: book.author,
+                            artworkData: book.coverImageData
+                        )
                     }
                 } catch {
                     attachError = error.localizedDescription
@@ -2111,35 +1911,83 @@ struct DenseWord {
     let wordIndex: Int
 }
 
-#if DEBUG
-/// Temporary read-along diagnostic. Shows the live state of the highlight
-/// chain so we can see exactly where it breaks. Remove once verified.
-struct ReadAlongDebugHUD: View {
-    var engine: AudioEngine
-    var tracker: ActiveWordTracker
-    let toggleOn: Bool
-    let aligned: Bool
-    let anchorCount: Int
-    let paginatedActive: Bool
-    let currentPage: Int
-    let targetPageForActive: (Int) -> Int?
+/// Whitespace tokenizer every word-indexing consumer shares — pagination,
+/// seek offsets, read-along lookups, and `ParagraphRow`'s active-word bounds
+/// all count words with this exact split so their indices line up.
+func tokenizeWords(_ text: String) -> [String] {
+    text.components(separatedBy: .whitespacesAndNewlines).filter { !$0.isEmpty }
+}
 
-    var body: some View {
-        let aw = tracker.current
-        let awStr = aw.map { "w\($0.wordIndex)" } ?? "nil"
-        let tgt = aw.flatMap { targetPageForActive($0.wordIndex) }
-        Text("RA tog:\(toggleOn ? "Y" : "N") aln:\(aligned ? "Y" : "N") anch:\(anchorCount) play:\(engine.state == .playing ? "Y" : "N") t:\(Int(engine.currentTime)) aw:\(awStr) pag:\(paginatedActive ? "Y" : "N") cur:\(currentPage) tgt:\(tgt.map(String.init) ?? "nil")")
-            .font(.system(size: 11, weight: .bold, design: .monospaced))
-            .padding(.horizontal, 8)
-            .padding(.vertical, 4)
-            .background(Color.black.opacity(0.82))
-            .foregroundStyle(Color.green)
-            .clipShape(Capsule())
-            .allowsHitTesting(false)
-            .padding(.top, 4)
+/// Narration-follow bookkeeping. Plain class (never invalidates SwiftUI):
+/// `suspendedUntil` is written from the scroll view's drag observer at
+/// touch-move rate, and nothing in `body` reads either field — they only
+/// gate `followNarration()`, which runs from audio-tick handlers.
+final class FollowState {
+    /// Follow won't drive the page/scroll position before this instant.
+    var suspendedUntil: Date?
+    /// The page the last follow-driven turn targeted; consumed by the
+    /// `currentPageIndex` onChange so manual turns stay distinguishable.
+    var drivenPage: Int?
+}
+
+/// Word→paragraph and word→page lookup tables for one (chapter, budget),
+/// memoized by `ReaderView.wordLayout(for:)`. Deliberately a plain class —
+/// not `@Observable`, never invalidates SwiftUI — because it's a derived
+/// cache: it must be refreshable mid-body (the DEBUG HUD reads it during
+/// view evaluation, where `@State` writes are illegal) and consultable per
+/// narrated-word change without re-rendering the reader.
+final class SegmentWordLayoutCache {
+    private(set) var key: String = ""
+    /// `paragraphStarts[p]` = chapter-global index of paragraph `p`'s first word.
+    private var paragraphStarts: [Int] = []
+    /// `pageStarts[g]` = chapter-global index of page `g`'s first word, at the
+    /// budget the flat page-curl sequence paginates with.
+    private var pageStarts: [Int] = []
+
+    func update(key: String, paragraphStarts: [Int], pageStarts: [Int]) {
+        self.key = key
+        self.paragraphStarts = paragraphStarts
+        self.pageStarts = pageStarts
+    }
+
+    func paragraphIndex(forWord word: Int) -> Int? {
+        containerIndex(of: word, in: paragraphStarts)
+    }
+
+    func pageIndex(forWord word: Int) -> Int? {
+        containerIndex(of: word, in: pageStarts)
+    }
+
+    /// Chapter-global index of the paragraph's first word, for jumping to a
+    /// paragraph by way of the word→page table.
+    func firstWord(ofParagraph p: Int) -> Int? {
+        paragraphStarts.indices.contains(p) ? paragraphStarts[p] : nil
+    }
+
+    /// Chapter-global index of the page's first word — the budget-independent
+    /// anchor persisted with reading progress.
+    func startWord(ofPage p: Int) -> Int? {
+        pageStarts.indices.contains(p) ? pageStarts[p] : nil
+    }
+
+    /// Largest index whose start word is ≤ `word` — `starts` is ascending, so
+    /// that's the paragraph/page containing the word. Words before the first
+    /// start clamp to 0, words past the last start to the final entry.
+    private func containerIndex(of word: Int, in starts: [Int]) -> Int? {
+        guard !starts.isEmpty else { return nil }
+        var lo = 0, hi = starts.count - 1, best = 0
+        while lo <= hi {
+            let mid = (lo + hi) / 2
+            if starts[mid] <= word {
+                best = mid
+                lo = mid + 1
+            } else {
+                hi = mid - 1
+            }
+        }
+        return best
     }
 }
-#endif
 
 struct ParagraphAnchor: Identifiable, Equatable {
     let segmentID: String

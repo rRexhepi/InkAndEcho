@@ -67,7 +67,7 @@ struct AnnotationsListSheet: View {
                 .font(.system(.title3, design: .serif))
                 .fontWeight(.semibold)
                 .foregroundStyle(Theme.ink)
-            Text("Long-press a paragraph to bookmark it, write a note, or highlight a passage. Everything you mark shows up here.")
+            Text("Tap the ⋯ beside a paragraph to bookmark it, write a note, or highlight a passage. Everything you mark shows up here.")
                 .font(.system(.callout, design: .serif))
                 .foregroundStyle(Theme.inkMuted)
                 .multilineTextAlignment(.center)
@@ -81,7 +81,7 @@ struct AnnotationsListSheet: View {
     }
 
     private var sortedAnnotations: [Annotation] {
-        let segmentOrder = Dictionary(uniqueKeysWithValues: segments.enumerated().map { ($0.element.id, $0.offset) })
+        let segmentOrder = Dictionary(segments.enumerated().map { ($0.element.id, $0.offset) }, uniquingKeysWith: { first, _ in first })
         return book.annotations.sorted { a, b in
             let aLoc = a.paragraphLocation
             let bLoc = b.paragraphLocation

@@ -40,12 +40,6 @@ struct SettingsView: View {
     @AppStorage(AppSettings.defaultHighlightColorKey) private var defaultHighlightColorRaw: String = AnnotationColor.amber.rawValue
     @AppStorage(AppSettings.wordHighlightingKey) private var wordHighlightingEnabled: Bool = false
 
-    /// Theme value as the sheet was first opened. Used on iOS to detect
-    /// "user changed the theme" so we can show the restart prompt — iOS
-    /// doesn't reliably refresh the entire app's color scheme without a
-    /// relaunch, even with `UIWindow.overrideUserInterfaceStyle`.
-    @State private var themeAtOpen: String?
-
     private var theme: Binding<ThemeChoice> {
         Binding(
             get: { ThemeChoice(rawValue: themeRaw) ?? .system },
@@ -62,12 +56,6 @@ struct SettingsView: View {
                     }
                 }
                 .pickerStyle(.segmented)
-
-                #if os(iOS)
-                if let opened = themeAtOpen, opened != themeRaw {
-                    restartPrompt
-                }
-                #endif
 
                 Toggle("Page-turn animations", isOn: $animationsEnabled)
                 Text("Turn off if you prefer instant page changes.")
@@ -90,9 +78,6 @@ struct SettingsView: View {
             }
         }
         .formStyle(.grouped)
-        .onAppear {
-            if themeAtOpen == nil { themeAtOpen = themeRaw }
-        }
         #if os(macOS)
         .frame(width: 460, height: 220)
         #endif
@@ -122,44 +107,11 @@ struct SettingsView: View {
         }
     }
 
-    #if os(iOS)
-    /// Inline notice that appears the moment the user picks a different
-    /// theme than the one in effect when Settings opened. Tapping the
-    /// "Restart now" button calls `exit(0)` to terminate; iOS relaunches
-    /// the app on next icon tap with the new theme baked in. Honest about
-    /// the limitation rather than pretending the swap is instant.
-    private var restartPrompt: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack(alignment: .top, spacing: 10) {
-                Image(systemName: "arrow.clockwise.circle.fill")
-                    .font(.system(size: 18))
-                    .foregroundStyle(Theme.accent)
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("Restart Ink and Echo to apply.")
-                        .font(.callout.weight(.semibold))
-                        .foregroundStyle(Theme.ink)
-                    Text("iOS doesn't refresh the theme of an open app. Tap the button to close it now, then reopen.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-            }
-            Button {
-                exit(0)
-            } label: {
-                Text("Restart now")
-                    .font(.system(size: 14, weight: .semibold))
-                    .foregroundStyle(Theme.onAccent)
-                    .padding(.horizontal, 16)
-                    .padding(.vertical, 8)
-                    .background(Theme.accent)
-                    .clipShape(Capsule())
-            }
-            .buttonStyle(.plain)
-        }
-        .padding(.vertical, 6)
-    }
-    #endif
+    // The old "Restart now" prompt (with `exit(0)`) is gone: the claim that
+    // iOS can't refresh an open app's theme was stale — `InkAndEchoApp`'s
+    // `applyTheme` pushes `overrideUserInterfaceStyle` to every window with
+    // a cross-dissolve, live, the moment the picker changes. Programmatic
+    // termination is also an App Review flag.
 }
 
 #if os(iOS)

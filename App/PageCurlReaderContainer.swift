@@ -89,6 +89,13 @@ struct PageCurlReaderContainer: UIViewControllerRepresentable {
         context.coordinator.parent = self
         applyAnimationMode(to: pvc, coordinator: context.coordinator)
         guard totalPages > 0 else { return }
+        // A user curl may be mid-flight (finger holding a half-turned page).
+        // Calling `setViewControllers` during that transition corrupts the
+        // pageCurl's internal state — and narration-follow writes the bound
+        // index from audio ticks, so this is not a theoretical overlap.
+        // Skip; `didFinishAnimating` re-syncs the binding on completion and
+        // the next update reconciles.
+        guard !context.coordinator.isUserTransitioning else { return }
         let safe = max(0, min(currentIndex, totalPages - 1))
         let visible = pvc.viewControllers?.compactMap { ($0 as? IndexedHostingController)?.pageIndex } ?? []
         let animated = context.coordinator.consumeAnimatedFlip()
@@ -115,21 +122,32 @@ struct PageCurlReaderContainer: UIViewControllerRepresentable {
     ) {
         let safe = max(0, min(override ?? currentIndex, totalPages - 1))
         if useSpread {
+            // A `.mid`-spine pageCurl requires EXACTLY two view controllers
+            // in every `setViewControllers` call — handing it one raises
+            // NSInvalidArgumentException. Odd page counts therefore pair the
+            // final page with a blank parchment filler.
             let leftIdx = (safe / 2) * 2
-            let leftVC = makePage(at: leftIdx)
-            if leftIdx + 1 < totalPages {
-                let rightVC = makePage(at: leftIdx + 1)
-                pvc.setViewControllers([leftVC, rightVC], direction: direction, animated: animated)
-            } else {
-                pvc.setViewControllers([leftVC], direction: direction, animated: animated)
-            }
+            pvc.setViewControllers(
+                [makePage(at: leftIdx), makePage(at: leftIdx + 1)],
+                direction: direction,
+                animated: animated
+            )
         } else {
             pvc.setViewControllers([makePage(at: safe)], direction: direction, animated: animated)
         }
     }
 
     private func makePage(at index: Int) -> IndexedHostingController {
-        IndexedHostingController(pageIndex: index, rootView: pageBuilder(index))
+        // Past-the-end = the filler back cover that squares off an odd page
+        // count in spread mode. Plain parchment, still indexed so the data
+        // source can navigate from it.
+        guard index < totalPages else {
+            return IndexedHostingController(
+                pageIndex: index,
+                rootView: AnyView(Color(uiColor: Self.parchmentCanvasUIColor))
+            )
+        }
+        return IndexedHostingController(pageIndex: index, rootView: pageBuilder(index))
     }
 
     func makeCoordinator() -> Coordinator {
@@ -143,6 +161,10 @@ struct PageCurlReaderContainer: UIViewControllerRepresentable {
         /// One-shot — consumed by the next `updateUIViewController` so
         /// chapter picks and progress restore still snap.
         private var pendingAnimatedFlip = false
+        /// True from `willTransitionTo` until `didFinishAnimating` — i.e.
+        /// while a gesture-driven curl owns the page controller. Binding
+        /// reconciliation must not call `setViewControllers` in that window.
+        private(set) var isUserTransitioning = false
 
         init(parent: PageCurlReaderContainer) {
             self.parent = parent
@@ -171,7 +193,18 @@ struct PageCurlReaderContainer: UIViewControllerRepresentable {
         }
 
         func flipPage(forward: Bool) {
-            let target = forward ? parent.currentIndex + 1 : parent.currentIndex - 1
+            // Spread mode steps by two from the normalized LEFT index — a ±1
+            // step lands on the odd half of the same visible pair, which the
+            // reconciler normalizes straight back: every other key press or
+            // edge tap became a silent no-op (that still suspended
+            // narration-follow and force-saved progress).
+            let target: Int
+            if parent.useSpread {
+                let left = (parent.currentIndex / 2) * 2
+                target = forward ? left + 2 : left - 2
+            } else {
+                target = forward ? parent.currentIndex + 1 : parent.currentIndex - 1
+            }
             guard target >= 0, target < parent.totalPages else { return }
             pendingAnimatedFlip = parent.animationsEnabled
             parent.currentIndex = target
@@ -183,14 +216,22 @@ struct PageCurlReaderContainer: UIViewControllerRepresentable {
             return v
         }
 
+        /// Last index a gesture can land on. In spread mode an odd page
+        /// count is squared off with one blank filler so `.mid` spine always
+        /// has a pair — and so the final page is reachable by swipe at all.
+        private var lastNavigableIndex: Int {
+            parent.useSpread && parent.totalPages % 2 == 1
+                ? parent.totalPages       // the filler slot
+                : parent.totalPages - 1
+        }
+
         func pageViewController(
             _ pageViewController: UIPageViewController,
             viewControllerBefore viewController: UIViewController
         ) -> UIViewController? {
             guard let current = viewController as? IndexedHostingController,
                   current.pageIndex > 0 else { return nil }
-            let prev = current.pageIndex - 1
-            return IndexedHostingController(pageIndex: prev, rootView: parent.pageBuilder(prev))
+            return parent.makePage(at: current.pageIndex - 1)
         }
 
         func pageViewController(
@@ -198,9 +239,15 @@ struct PageCurlReaderContainer: UIViewControllerRepresentable {
             viewControllerAfter viewController: UIViewController
         ) -> UIViewController? {
             guard let current = viewController as? IndexedHostingController,
-                  current.pageIndex < parent.totalPages - 1 else { return nil }
-            let next = current.pageIndex + 1
-            return IndexedHostingController(pageIndex: next, rootView: parent.pageBuilder(next))
+                  current.pageIndex < lastNavigableIndex else { return nil }
+            return parent.makePage(at: current.pageIndex + 1)
+        }
+
+        func pageViewController(
+            _ pageViewController: UIPageViewController,
+            willTransitionTo pendingViewControllers: [UIViewController]
+        ) {
+            isUserTransitioning = true
         }
 
         func pageViewController(
@@ -209,12 +256,15 @@ struct PageCurlReaderContainer: UIViewControllerRepresentable {
             previousViewControllers: [UIViewController],
             transitionCompleted completed: Bool
         ) {
+            isUserTransitioning = false
             guard finished, completed,
                   let current = pageViewController.viewControllers?.first as? IndexedHostingController
             else { return }
+            // Clamp in case the visible left page is ever the filler.
+            let landed = min(current.pageIndex, parent.totalPages - 1)
             // Defer so we don't re-enter the representable update path mid-animation.
             DispatchQueue.main.async {
-                self.parent.currentIndex = current.pageIndex
+                self.parent.currentIndex = landed
             }
         }
 
