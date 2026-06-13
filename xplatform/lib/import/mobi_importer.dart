@@ -203,17 +203,25 @@ class _MOBIHeader {
     final bd = ByteData.sublistView(rec0);
     int u32(int o) => o + 4 <= rec0.length ? bd.getUint32(o, Endian.big) : 0;
     final mobiType = u32(_Mobi.mobiType);
+    final headerLength = u32(_Mobi.headerLength);
     return _MOBIHeader(
-      headerLength: u32(_Mobi.headerLength),
+      headerLength: headerLength,
       textEncoding: u32(_Mobi.textEncoding),
       firstNonBookIndex: u32(_Mobi.firstNonBookIndex),
       fullNameOffset: u32(_Mobi.fullNameOffset),
       fullNameLength: u32(_Mobi.fullNameLength),
       firstImageRecord: u32(_Mobi.firstImageRecord),
       exthFlags: u32(_Mobi.exthFlags),
-      extraDataFlags: rec0.length >= _Mobi.extraDataFlags + 2
-          ? bd.getUint16(_Mobi.extraDataFlags, Endian.big)
-          : 0,
+      // extraDataFlags sits at MOBI-header offset 226 (abs 242) and only
+      // exists in headers >= 228 bytes (the 0xE4 check Calibre/libmobi
+      // use). Guarding on rec0.length alone is wrong: with a shorter
+      // header plus an EXTH block, abs 242 lands inside EXTH and reads
+      // its bytes as trailer flags — which then strip every text record
+      // down to nothing.
+      extraDataFlags:
+          headerLength >= 228 && rec0.length >= _Mobi.extraDataFlags + 2
+              ? bd.getUint16(_Mobi.extraDataFlags, Endian.big)
+              : 0,
       // 248 / 257 are the Mobipocket type values for KF8-formatted files.
       isKF8: mobiType == 248 || mobiType == 257,
     );

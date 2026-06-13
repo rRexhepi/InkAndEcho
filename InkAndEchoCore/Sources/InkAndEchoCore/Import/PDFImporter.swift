@@ -74,6 +74,11 @@ private func collectTopLevelOutline(_ root: PDFOutline, doc: PDFDocument) -> [Ou
         let label = (child.label ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         guard let dest = child.destination, let page = dest.page else { continue }
         let pageIdx = doc.index(for: page)
+        // `index(for:)` returns NSNotFound (Int.max) when the bookmark's
+        // destination page isn't in this document's page tree. Sorted last,
+        // that entry would hand the preceding chapter `endPage = Int.max`
+        // and `pageRangeText` would loop effectively forever.
+        guard pageIdx != NSNotFound, pageIdx < doc.pageCount else { continue }
         entries.append(OutlineEntry(title: label, startPage: pageIdx))
     }
     return entries.sorted { $0.startPage < $1.startPage }
@@ -83,7 +88,8 @@ private func segmentsFromOutline(entries: [OutlineEntry], doc: PDFDocument) -> [
     guard !entries.isEmpty else { return nil }
     var out: [TextSegment] = []
     for (i, entry) in entries.enumerated() {
-        let endPage = i + 1 < entries.count ? entries[i + 1].startPage : doc.pageCount
+        // Belt-and-braces clamp alongside the NSNotFound filter above.
+        let endPage = min(i + 1 < entries.count ? entries[i + 1].startPage : doc.pageCount, doc.pageCount)
         guard entry.startPage < endPage else { continue }
         let text = pageRangeText(doc: doc, from: entry.startPage, until: endPage)
         if text.isEmpty { continue }
@@ -130,7 +136,10 @@ private func renderCover(from doc: PDFDocument) -> Data? {
     let bounds = page.bounds(for: .mediaBox)
     let maxEdge: CGFloat = 1024
     let longest = max(bounds.width, bounds.height)
-    let scale = longest > 0 ? min(maxEdge / longest, 2.0) : 1.0
+    // A corrupt MediaBox can yield a non-finite rect; ∞ × 0 = NaN, and
+    // `Int(NaN)` traps before the positivity guard below could catch it.
+    guard bounds.width.isFinite, bounds.height.isFinite, longest > 0 else { return nil }
+    let scale = min(maxEdge / longest, 2.0)
     let width = Int(bounds.width * scale)
     let height = Int(bounds.height * scale)
     guard width > 0, height > 0 else { return nil }

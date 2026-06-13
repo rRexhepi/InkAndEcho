@@ -105,9 +105,20 @@ private func extractData(from archive: Archive, path: String) throws -> Data {
     guard let entry = archive[path] else {
         throw ImporterError.malformedEPUB("Missing entry: \(path)")
     }
+    // Cap the inflated size. A zip bomb (kilobytes compressed, gigabytes
+    // declared) would otherwise grow `data` until jetsam kills the app —
+    // these bytes come straight from the file picker / "Open in…". 256 MB
+    // is far above any real EPUB member (big ones are a few MB).
+    let maxEntryBytes = 256 * 1024 * 1024
+    guard entry.uncompressedSize <= maxEntryBytes else {
+        throw ImporterError.malformedEPUB("Entry too large: \(path)")
+    }
     var data = Data()
     _ = try archive.extract(entry) { chunk in
         data.append(chunk)
+        if data.count > maxEntryBytes {
+            throw ImporterError.malformedEPUB("Entry exceeds declared size: \(path)")
+        }
     }
     return data
 }
@@ -205,7 +216,11 @@ private final class OPFDelegate: NSObject, XMLParserDelegate {
                 coverID = id
             }
         case "itemref":
-            if let idref = attrs["idref"] {
+            // Dedupe: a malformed spine listing the same idref twice would
+            // produce duplicate TextSegment ids, and everything keyed on
+            // segment id downstream (progress, annotations, the
+            // segment-order dictionaries) assumes uniqueness.
+            if let idref = attrs["idref"], !spine.contains(idref) {
                 spine.append(idref)
             }
         case "meta":
@@ -614,7 +629,11 @@ private func extractChapterTitle(from xhtml: String) -> String? {
 func stripHTML(_ html: String) -> String {
     var text = html
 
-    // Drop script/style blocks entirely.
+    // Drop non-content blocks entirely. <head> matters as much as
+    // script/style: its <title> text survives tag-stripping and prepended
+    // itself to every chapter — "Chapter ThreeChapter Three" at the top of
+    // any chapter whose file titles itself (which is most real EPUBs).
+    text = text.replacingOccurrences(of: "<head[^>]*>[\\s\\S]*?</head>", with: "", options: [.regularExpression, .caseInsensitive])
     text = text.replacingOccurrences(of: "<script[^>]*>[\\s\\S]*?</script>", with: "", options: .regularExpression)
     text = text.replacingOccurrences(of: "<style[^>]*>[\\s\\S]*?</style>", with: "", options: .regularExpression)
 

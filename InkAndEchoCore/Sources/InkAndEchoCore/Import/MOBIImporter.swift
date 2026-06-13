@@ -96,6 +96,13 @@ struct PalmDB {
                 bytes,
                 at: MOBIBytes.pdbHeaderSize + i * MOBIBytes.pdbRecordEntrySize
             ))
+            // The table itself is bounds-checked above, but the offset VALUES
+            // are untrusted: out-of-range or non-monotonic offsets would make
+            // `recordBytes` build a `start..<end` range that traps (lower >
+            // upper, or upper > count). Same bug class as the EXTH flags fix.
+            guard off <= bytes.count, off >= offsets.last ?? 0 else {
+                throw ImporterError.malformedMOBI("PalmDB record table has out-of-order or out-of-range offsets.")
+            }
             offsets.append(off)
         }
         return PalmDB(
@@ -156,11 +163,17 @@ struct MOBIHeader {
             o + 4 <= rec0.count ? Int(MOBIBytes.readUInt32BE(rec0, at: o)) : 0
         }
         let mobiType = u32(MOBIBytes.mobiType)
-        let extra = rec0.count >= MOBIBytes.mobiExtraDataFlags + 2
+        let headerLength = u32(MOBIBytes.mobiHeaderLength)
+        // extraDataFlags sits at MOBI-header offset 226 (abs 242) and only
+        // exists in headers ≥ 228 bytes (the 0xE4 check Calibre/libmobi use).
+        // Guarding on rec0.count alone is wrong: with a shorter header plus
+        // an EXTH block, abs 242 lands inside EXTH and reads its bytes as
+        // trailer flags — which then strip every text record down to nothing.
+        let extra = headerLength >= 228 && rec0.count >= MOBIBytes.mobiExtraDataFlags + 2
             ? Int(MOBIBytes.readUInt16BE(rec0, at: MOBIBytes.mobiExtraDataFlags))
             : 0
         return MOBIHeader(
-            headerLength: u32(MOBIBytes.mobiHeaderLength),
+            headerLength: headerLength,
             textEncoding: u32(MOBIBytes.mobiTextEncoding),
             firstNonBookIndex: u32(MOBIBytes.mobiFirstNonBookIndex),
             fullNameOffset: u32(MOBIBytes.mobiFullNameOffset),

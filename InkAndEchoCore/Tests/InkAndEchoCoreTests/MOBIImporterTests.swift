@@ -130,8 +130,11 @@ private struct SyntheticMOBI {
         writeUInt32BE(0, into: &mobi, at: 92)                         // firstImageRecord (abs 108)
         let exthFlags: UInt32 = exthBytes.isEmpty ? 0 : 0x40
         writeUInt32BE(exthFlags, into: &mobi, at: 112)                // exthFlags (abs 128)
-        // extraDataFlags at abs 242 = mobi offset 226 (uint16). We left it
-        // zero by construction.
+        // No extraDataFlags: that field (mobi offset 226, abs 242) only
+        // exists in headers ≥ 228 bytes, and this header is 224. With EXTH
+        // attached, abs 242 falls inside the EXTH block — the parser must
+        // not read those bytes as flags (regression: it once did, stripping
+        // every text record to nothing).
 
         rec0.append(mobi)
         rec0.append(exthBytes)
