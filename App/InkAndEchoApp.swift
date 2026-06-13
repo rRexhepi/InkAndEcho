@@ -11,6 +11,8 @@ struct InkAndEchoApp: App {
     /// hide its progress.
     @State private var alignment = AlignmentCoordinator()
 
+    private let container: ModelContainer = Self.makeContainer()
+
     private var theme: ThemeChoice {
         ThemeChoice(rawValue: themeRaw) ?? .system
     }
@@ -27,7 +29,55 @@ struct InkAndEchoApp: App {
                 applyTheme(newChoice)
             }
         }
-        .modelContainer(for: [Book.self, Annotation.self, ReadingProgress.self])
+        .modelContainer(container)
+    }
+
+    /// The only place a ModelContainer is constructed. Versioned (V1 = as
+    /// shipped in build 11, V2 = current) with a lightweight migration plan,
+    /// and a recovery path: the `.modelContainer(for:)` modifier fatalErrors
+    /// on any container failure, which turns one bad migration into a
+    /// permanent crash loop where delete-and-reinstall is the only way out.
+    /// Here a failed open moves the store aside (kept as a timestamped
+    /// backup, never silently destroyed) and starts fresh.
+    private static func makeContainer() -> ModelContainer {
+        let schema = Schema(versionedSchema: InkAndEchoSchemaV2.self)
+        do {
+            return try ModelContainer(
+                for: schema,
+                migrationPlan: InkAndEchoMigrationPlan.self,
+                configurations: [ModelConfiguration(schema: schema)]
+            )
+        } catch {
+            print("InkAndEcho: store open failed (\(error)); backing up store and starting fresh.")
+            backUpDefaultStore()
+            do {
+                return try ModelContainer(
+                    for: schema,
+                    migrationPlan: InkAndEchoMigrationPlan.self,
+                    configurations: [ModelConfiguration(schema: schema)]
+                )
+            } catch {
+                fatalError("InkAndEcho: unrecoverable SwiftData failure: \(error)")
+            }
+        }
+    }
+
+    /// Move `default.store` (+ -shm/-wal sidecars) to timestamped backups so
+    /// a fresh store can be created without destroying the user's data.
+    private static func backUpDefaultStore() {
+        let fm = FileManager.default
+        guard let support = try? fm.url(
+            for: .applicationSupportDirectory,
+            in: .userDomainMask,
+            appropriateFor: nil,
+            create: true
+        ) else { return }
+        let stamp = Int(Date.now.timeIntervalSince1970)
+        for suffix in ["", "-shm", "-wal"] {
+            let src = support.appendingPathComponent("default.store\(suffix)")
+            let dst = support.appendingPathComponent("default.store.backup-\(stamp)\(suffix)")
+            try? fm.moveItem(at: src, to: dst)
+        }
     }
 }
 

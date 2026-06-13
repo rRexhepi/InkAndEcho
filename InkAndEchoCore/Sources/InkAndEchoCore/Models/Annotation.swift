@@ -1,48 +1,54 @@
 import Foundation
 import SwiftData
 
-@Model
-public final class Annotation {
-    @Attribute(.unique) public var id: UUID
-    public var book: Book?
-    /// Anchor of the highlight start. Stored as `"<segmentID>#p<paragraphIndex>"`
-    /// for paragraph-level annotations; full EPUB CFI is reserved for v2 when
-    /// real text-range selection lands.
-    public var cfiStart: String
-    public var cfiEnd: String
-    public var colorRaw: String
-    public var kindRaw: String
-    public var note: String
-    public var createdAt: Date
+/// Live model — the V2 class, re-exported under its plain name. See
+/// SchemaVersions.swift for the versioning rules before changing anything.
+public typealias Annotation = InkAndEchoSchemaV2.Annotation
 
-    public var color: AnnotationColor {
-        get { AnnotationColor(rawValue: colorRaw) ?? .amber }
-        set { colorRaw = newValue.rawValue }
-    }
+extension InkAndEchoSchemaV2 {
+    @Model
+    public final class Annotation {
+        @Attribute(.unique) public var id: UUID
+        public var book: Book?
+        /// Anchor of the highlight start. Stored as `"<segmentID>#p<paragraphIndex>"`
+        /// for paragraph-level annotations; full EPUB CFI is reserved for v2 when
+        /// real text-range selection lands.
+        public var cfiStart: String
+        public var cfiEnd: String
+        public var colorRaw: String
+        public var kindRaw: String
+        public var note: String
+        public var createdAt: Date
 
-    public var kind: AnnotationKind {
-        get { AnnotationKind(rawValue: kindRaw) ?? .highlight }
-        set { kindRaw = newValue.rawValue }
-    }
+        public var color: AnnotationColor {
+            get { AnnotationColor(rawValue: colorRaw) ?? .amber }
+            set { colorRaw = newValue.rawValue }
+        }
 
-    public init(
-        id: UUID = UUID(),
-        book: Book? = nil,
-        cfiStart: String,
-        cfiEnd: String,
-        kind: AnnotationKind = .highlight,
-        color: AnnotationColor = .amber,
-        note: String = "",
-        createdAt: Date = .now
-    ) {
-        self.id = id
-        self.book = book
-        self.cfiStart = cfiStart
-        self.cfiEnd = cfiEnd
-        self.kindRaw = kind.rawValue
-        self.colorRaw = color.rawValue
-        self.note = note
-        self.createdAt = createdAt
+        public var kind: AnnotationKind {
+            get { AnnotationKind(rawValue: kindRaw) ?? .highlight }
+            set { kindRaw = newValue.rawValue }
+        }
+
+        public init(
+            id: UUID = UUID(),
+            book: Book? = nil,
+            cfiStart: String,
+            cfiEnd: String,
+            kind: AnnotationKind = .highlight,
+            color: AnnotationColor = .amber,
+            note: String = "",
+            createdAt: Date = .now
+        ) {
+            self.id = id
+            self.book = book
+            self.cfiStart = cfiStart
+            self.cfiEnd = cfiEnd
+            self.kindRaw = kind.rawValue
+            self.colorRaw = color.rawValue
+            self.note = note
+            self.createdAt = createdAt
+        }
     }
 }
 
