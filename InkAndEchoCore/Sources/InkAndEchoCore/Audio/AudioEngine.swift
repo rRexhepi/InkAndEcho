@@ -43,10 +43,16 @@ public final class AudioEngine {
         timePitch.latency + engine.outputNode.presentationLatency
     }
 
-    private let engine = AVAudioEngine()
-    private let player = AVAudioPlayerNode()
-    private let timePitch = AVAudioUnitTimePitch()
+    // `var`, not `let`: a media-services reset (mediaserverd crash) leaves the
+    // whole graph dead and the only recovery is to discard and recreate every
+    // audio object. `rebuildAudioGraph()` reassigns these.
+    private var engine = AVAudioEngine()
+    private var player = AVAudioPlayerNode()
+    private var timePitch = AVAudioUnitTimePitch()
     private var audioFile: AVAudioFile?
+    /// Kept so the file can be reopened after a media-services reset (the old
+    /// `AVAudioFile` belongs to the dead media server).
+    private var audioURL: URL?
 
     private var seekOffsetSeconds: TimeInterval = 0
     private var baselineSampleTime: AVAudioFramePosition = 0
@@ -69,16 +75,36 @@ public final class AudioEngine {
     private var nowPlayingBase: [String: Any] = [:]
 
     public init() {
+        buildGraph()
+        Self.configureAudioSessionIfNeeded()
+        registerSystemObservers()
+        configureRemoteCommands()
+    }
+
+    /// Wire the current `engine`/`player`/`timePitch` together. Called from
+    /// `init` and after `rebuildAudioGraph()` replaces the nodes, so the
+    /// rebuilt graph matches the original exactly — including restoring the
+    /// user's playback `rate` (a fresh `AVAudioUnitTimePitch` defaults to 1×).
+    private func buildGraph() {
         engine.attach(player)
         engine.attach(timePitch)
         // Max overlap: cleaner time-stretch at 1.5×/2× narration. CPU
         // cost is negligible on every iOS device that ships this app.
         timePitch.overlap = 32
+        timePitch.rate = rate
         engine.connect(player, to: timePitch, format: nil)
         engine.connect(timePitch, to: engine.mainMixerNode, format: nil)
-        Self.configureAudioSessionIfNeeded()
-        registerSystemObservers()
-        configureRemoteCommands()
+    }
+
+    /// Discard the dead graph and stand up a fresh one. Only the audio
+    /// objects are recreated here; the caller restores file scheduling and
+    /// playback state.
+    private func rebuildAudioGraph() {
+        engine.stop()          // best-effort; the graph is already dead
+        engine = AVAudioEngine()
+        player = AVAudioPlayerNode()
+        timePitch = AVAudioUnitTimePitch()
+        buildGraph()
     }
 
     deinit {
@@ -167,6 +193,17 @@ public final class AudioEngine {
                 self?.handleRouteChange(reasonRaw: reasonRaw)
             }
         })
+        // mediaserverd crashed and restarted: every audio object is invalid.
+        // Object is nil (system-wide notification, not session-scoped).
+        notificationTokens.append(center.addObserver(
+            forName: AVAudioSession.mediaServicesWereResetNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.handleMediaServicesReset()
+            }
+        })
         #endif
     }
 
@@ -194,6 +231,66 @@ public final class AudioEngine {
         // blasting the loudspeaker — the platform convention.
         if reason == .oldDeviceUnavailable, state == .playing {
             pause()
+        }
+    }
+
+    /// mediaserverd restarted — the engine, player, time-pitch unit, audio
+    /// session, and the open `AVAudioFile` are all dead. Rebuild the entire
+    /// graph and resume from the current position. Cannot be exercised in the
+    /// simulator; on device it's Settings ▸ Developer ▸ Reset Media Services,
+    /// or a real mediaserverd crash.
+    private func handleMediaServicesReset() {
+        let wasPlaying = (state == .playing)
+        let resumeAt = currentTime
+        stopDisplayTimer()
+        rebuildAudioGraph()
+
+        // The shared session went down with the media server: re-arm the
+        // one-shot configure/activate guards and re-apply the category.
+        // `play()` reactivates if we resume.
+        Self.didConfigureSession = false
+        Self.didActivateSession = false
+        Self.configureAudioSessionIfNeeded()
+
+        // The old file handle belonged to the dead media server; reopen.
+        if let url = audioURL {
+            audioFile = try? AVAudioFile(forReading: url)
+        }
+        guard audioFile != nil else {
+            // Reopen failed: drop to a clean unloaded state AND clear the
+            // lock-screen tile. `nowPlayingInfo` is only ever written, never
+            // cleared, so leaving it would keep a controllable-looking but
+            // dead tile pointing at the old book.
+            currentTime = 0
+            duration = 0
+            state = .idle
+            MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
+            return
+        }
+
+        // Re-queue from where playback was and restore transport state.
+        _ = scheduleSegment(at: resumeAt)
+        // `play()` sets `state = .playing` only AFTER `try engine.start()`,
+        // which is likely to throw while mediaserverd is still settling right
+        // after the reset. A bare `try?` there would swallow the failure and
+        // strand a zombie `.playing` (timer already stopped, silence, pause
+        // button shown) — the exact failure this whole path exists to kill.
+        // Catch it and fall back to a coherent `.paused`. And if the reset
+        // landed in the final 50 ms, skip the resume entirely: `play()`'s
+        // EOF-rearm would `seek(to: 0)` and replay the whole book from the
+        // start instead of ending paused at EOF.
+        let atEOF = duration > 0 && resumeAt >= duration - 0.05
+        if wasPlaying && !atEOF {
+            do {
+                try play()
+            } catch {
+                state = .paused
+                updateNowPlayingPlayback()
+            }
+        } else {
+            currentTime = atEOF ? duration : currentTime
+            state = .paused
+            updateNowPlayingPlayback()
         }
     }
     #endif
@@ -280,6 +377,7 @@ public final class AudioEngine {
         do {
             let file = try AVAudioFile(forReading: url)
             audioFile = file
+            audioURL = url
             duration = Double(file.length) / file.processingFormat.sampleRate
             currentTime = 0
             seekOffsetSeconds = 0
@@ -289,6 +387,7 @@ public final class AudioEngine {
             updateNowPlayingPlayback()
         } catch {
             audioFile = nil
+            audioURL = nil
             state = .error("Failed to load audio: \(error.localizedDescription)")
             throw error
         }
@@ -326,24 +425,39 @@ public final class AudioEngine {
     }
 
     public func seek(to time: TimeInterval) {
-        guard let file = audioFile else { return }
-        let clamped = max(0, min(time, duration))
-        let sampleRate = file.processingFormat.sampleRate
-        let startFrame = AVAudioFramePosition(clamped * sampleRate)
-        let frameCount = AVAudioFrameCount(max(0, file.length - startFrame))
-
+        guard audioFile != nil else { return }
         let wasPlaying = (state == .playing)
         player.stop()
-        seekOffsetSeconds = clamped
-        baselineSampleTime = 0
-        currentTime = clamped
-
-        guard frameCount > 0 else {
+        let scheduled = scheduleSegment(at: time)
+        guard scheduled else {
+            // `time` landed at/past EOF — no frames to play. Keep the clamped
+            // position (scheduleSegment set it) and drop to paused.
             state = wasPlaying ? .paused : state
             stopDisplayTimer()
             return
         }
+        if wasPlaying {
+            try? play()
+        } else {
+            updateNowPlayingPlayback()
+        }
+    }
 
+    /// Clamp `time`, set the position bookkeeping, and queue the rest of the
+    /// file on `player` (no stop, no start — the caller owns transport).
+    /// Returns false when there are no frames to schedule (at/past EOF).
+    /// Shared by `seek` and the media-services-reset rebuild.
+    @discardableResult
+    private func scheduleSegment(at time: TimeInterval) -> Bool {
+        guard let file = audioFile else { return false }
+        let clamped = max(0, min(time, duration))
+        let sampleRate = file.processingFormat.sampleRate
+        let startFrame = AVAudioFramePosition(clamped * sampleRate)
+        let frameCount = AVAudioFrameCount(max(0, file.length - startFrame))
+        seekOffsetSeconds = clamped
+        baselineSampleTime = 0
+        currentTime = clamped
+        guard frameCount > 0 else { return false }
         // `.dataPlayedBack`: fire when the audio is actually audible-complete,
         // not when the last buffer is merely consumed from the queue (the
         // handler-only variant), which lands early by the output buffer length
@@ -351,12 +465,7 @@ public final class AudioEngine {
         player.scheduleSegment(file, startingFrame: startFrame, frameCount: frameCount, at: nil, completionCallbackType: .dataPlayedBack) { [weak self] _ in
             Task { @MainActor in self?.handlePlaybackEnded() }
         }
-
-        if wasPlaying {
-            try? play()
-        } else {
-            updateNowPlayingPlayback()
-        }
+        return true
     }
 
     public func setRate(_ newRate: Float) {
