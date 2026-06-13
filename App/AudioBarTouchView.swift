@@ -161,7 +161,9 @@ struct AudioBarTouchView: View {
     }
 
     private func formatRate(_ rate: Float) -> String {
-        rate == floor(rate) ? "\(Int(rate))×" : String(format: "%.2g×", rate)
+        // `%g`, not `%.2g`: two significant digits truncated 1.25 to "1.2×"
+        // in the pill and menu while actually playing 1.25×.
+        rate == floor(rate) ? "\(Int(rate))×" : String(format: "%g×", rate)
     }
 }
 
@@ -173,20 +175,28 @@ private struct ScrubberRow: View {
     let engine: AudioEngine
     @State private var displayTime: TimeInterval = 0
     @State private var displayDuration: TimeInterval = 0.001
+    @State private var isScrubbing = false
 
     private static let tickInterval: TimeInterval = 1.0 / 3.0
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
+            // Seek ONLY on release. SwiftUI fires the value setter for every
+            // thumb movement, and each `engine.seek` is a full
+            // stop + reschedule + play — dozens per second of drag stuttered
+            // like a machine gun and spammed stop-fired completion handlers.
             Slider(
                 value: Binding(
                     get: { min(displayTime, displayDuration) },
-                    set: { newValue in
-                        engine.seek(to: newValue)
-                        displayTime = newValue
-                    }
+                    set: { displayTime = $0 }
                 ),
-                in: 0...displayDuration
+                in: 0...displayDuration,
+                onEditingChanged: { editing in
+                    isScrubbing = editing
+                    if !editing {
+                        engine.seek(to: displayTime)
+                    }
+                }
             )
             .tint(Theme.accent)
             .disabled(displayDuration <= 0.001)
@@ -206,6 +216,8 @@ private struct ScrubberRow: View {
     }
 
     private func syncFromEngine() {
+        // Don't fight the user's thumb mid-drag.
+        guard !isScrubbing else { return }
         displayTime = engine.currentTime
         displayDuration = max(engine.duration, 0.001)
     }
