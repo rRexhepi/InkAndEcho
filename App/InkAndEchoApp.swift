@@ -10,6 +10,10 @@ struct InkAndEchoApp: App {
     /// so backing out of a book mid-alignment doesn't cancel the work or
     /// hide its progress.
     @State private var alignment = AlignmentCoordinator()
+    /// The single shared audio engine, owned for the whole session so
+    /// playback survives leaving a reader. Injected via environment; every
+    /// `ReaderView` and the library mini-player read this one instance.
+    @State private var audio = AudioCoordinator()
 
     private let container: ModelContainer = Self.makeContainer()
 
@@ -22,6 +26,7 @@ struct InkAndEchoApp: App {
             MigrationGate {
                 LibraryView()
                     .environment(alignment as AlignmentCoordinator?)
+                    .environment(audio)
             }
             .onAppear { applyTheme(theme) }
             .onChange(of: themeRaw) { _, newRaw in

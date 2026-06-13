@@ -279,7 +279,9 @@ extension ReaderView {
 
     @ViewBuilder
     var iosAudioFooter: some View {
-        if book.audiobookFileURL != nil {
+        if showSwitchToAudioBar {
+            switchToAudiobookBar
+        } else if book.audiobookFileURL != nil {
             AudioBarTouchView(
                 engine: engine,
                 compact: false,
@@ -290,6 +292,37 @@ extension ReaderView {
         } else {
             attachAudiobookBar
         }
+    }
+
+    /// Background mode, another book playing: a single tap to bring the shared
+    /// engine onto this book (resuming its saved spot) instead of live
+    /// transport for a book that isn't currently loaded.
+    var switchToAudiobookBar: some View {
+        Button {
+            activateThisBookAudio()
+        } label: {
+            HStack(spacing: 10) {
+                Image(systemName: "play.circle.fill")
+                    .font(.system(size: 22))
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("Play this audiobook")
+                        .font(.system(size: 14, weight: .semibold))
+                    Text("“\(audio.loadedTitle)” is playing")
+                        .font(.system(size: 11))
+                        .foregroundStyle(Theme.inkMuted)
+                        .lineLimit(1)
+                }
+                Spacer(minLength: 0)
+            }
+            .foregroundStyle(Theme.ink)
+            .padding(.horizontal, 18)
+            .padding(.vertical, 12)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(Theme.canvasCool)
+            .overlay(Rectangle().fill(Theme.hairline).frame(height: 1), alignment: .top)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
     }
 
     // MARK: - iPhone layout
@@ -452,7 +485,9 @@ extension ReaderView {
 
     @ViewBuilder
     var phoneAudioBarOrAttach: some View {
-        if book.audiobookFileURL != nil {
+        if showSwitchToAudioBar {
+            switchToAudiobookBar
+        } else if book.audiobookFileURL != nil {
             AudioBarTouchView(
                 engine: engine,
                 compact: true,

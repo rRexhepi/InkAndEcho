@@ -6,6 +6,7 @@ import InkAndEchoCore
 struct LibraryView: View {
     @Environment(\.modelContext) private var modelContext
     @Environment(AlignmentCoordinator.self) private var alignment
+    @Environment(AudioCoordinator.self) private var audio
     @Query(sort: \Book.addedAt, order: .reverse) private var books: [Book]
     @State private var selectedBook: Book?
     @State private var showingImporter = false
@@ -110,6 +111,27 @@ struct LibraryView: View {
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
 
     private var iosLibraryGrid: some View {
+        grid.safeAreaInset(edge: .bottom, spacing: 0) {
+            // Now-playing bar: the shared engine keeps playing in the library;
+            // this is the way back to the playing book. Hidden when nothing
+            // is loaded. A pushed reader covers it (inset is on the root).
+            if audio.hasAudio {
+                LibraryMiniPlayer(
+                    title: audio.loadedTitle,
+                    author: audio.loadedAuthor,
+                    coverData: audio.loadedCoverData,
+                    engine: audio.engine,
+                    onOpen: {
+                        if let id = audio.loadedBookID {
+                            selectedBook = books.first(where: { $0.id == id })
+                        }
+                    }
+                )
+            }
+        }
+    }
+
+    private var grid: some View {
         Group {
             if books.isEmpty {
                 LibraryEmptyState(onImport: { showingImporter = true })
@@ -201,6 +223,9 @@ struct LibraryView: View {
         if alignment.isRunning(for: book.id) {
             alignment.cancel()
         }
+        // If the shared engine is playing this book, stop it — its file is
+        // about to be deleted out from under the player.
+        audio.unload(ifBookID: book.id)
         let service = ImportService(modelContext: modelContext)
         do {
             try service.deleteBook(book)
@@ -215,6 +240,76 @@ struct LibraryView: View {
               let uuid = UUID(uuidString: lastOpenedBookID),
               let match = books.first(where: { $0.id == uuid }) else { return }
         selectedBook = match
+    }
+}
+
+/// Now-playing bar pinned to the bottom of the library. Tapping the bar opens
+/// the playing book; the trailing button toggles play/pause. Scoped as its
+/// own view so reading `engine.state` re-renders only this strip, not the
+/// whole grid. No live scrubber here, so it doesn't subscribe to the 30 Hz
+/// `currentTime` tick.
+private struct LibraryMiniPlayer: View {
+    let title: String
+    let author: String
+    let coverData: Data?
+    var engine: AudioEngine
+    let onOpen: () -> Void
+
+    private var isPlaying: Bool { engine.state == .playing }
+
+    var body: some View {
+        HStack(spacing: 12) {
+            cover
+            VStack(alignment: .leading, spacing: 1) {
+                Text(title)
+                    .font(.system(size: 13, weight: .semibold, design: .serif))
+                    .foregroundStyle(Theme.ink)
+                    .lineLimit(1)
+                Text(author)
+                    .font(.system(size: 11, design: .serif))
+                    .italic()
+                    .foregroundStyle(Theme.inkMuted)
+                    .lineLimit(1)
+            }
+            Spacer(minLength: 0)
+            Button {
+                if isPlaying { engine.pause() } else { try? engine.play() }
+            } label: {
+                Image(systemName: isPlaying ? "pause.fill" : "play.fill")
+                    .font(.system(size: 16, weight: .semibold))
+                    .foregroundStyle(Theme.onAccent)
+                    .frame(width: 38, height: 38)
+                    .background(Theme.accent)
+                    .clipShape(Circle())
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 8)
+        .background(.ultraThinMaterial)
+        .overlay(Rectangle().fill(Theme.hairline).frame(height: 1), alignment: .top)
+        .contentShape(Rectangle())
+        .onTapGesture { onOpen() }
+    }
+
+    @ViewBuilder
+    private var cover: some View {
+        if let coverData, let image = Image(platformData: coverData) {
+            image
+                .resizable()
+                .aspectRatio(contentMode: .fill)
+                .frame(width: 38, height: 38)
+                .clipShape(RoundedRectangle(cornerRadius: 4))
+        } else {
+            RoundedRectangle(cornerRadius: 4)
+                .fill(Theme.canvasDeep)
+                .frame(width: 38, height: 38)
+                .overlay(
+                    Image(systemName: "headphones")
+                        .font(.system(size: 14))
+                        .foregroundStyle(Theme.inkMuted)
+                )
+        }
     }
 }
 

@@ -13,7 +13,16 @@ struct ReaderView: View {
     @State var loadingSegments = true
     @State var loadError: String?
 
-    @State var engine = AudioEngine()
+    /// The shared, app-owned engine (lives in `AudioCoordinator`). The
+    /// computed `engine` below keeps every existing `engine.foo` call working
+    /// while the instance now outlives this view — audio keeps playing when
+    /// the reader is popped.
+    @Environment(AudioCoordinator.self) var audio
+    var engine: AudioEngine { audio.engine }
+    /// True when the engine is loaded with THIS book's audiobook. Gates
+    /// read-along, audio-position saving, and live transport UI — in
+    /// background mode the engine may be playing a different book.
+    var audioIsThisBook: Bool { audio.isLoaded(book) }
     @State var showAudioImporter = false
     @State var attachError: String?
     /// One-shot alert when a SwiftData save fails. Annotation and progress
@@ -49,6 +58,9 @@ struct ReaderView: View {
 
     @AppStorage("inkandecho.paginated") var paginated: Bool = true
     @AppStorage(AppSettings.wordHighlightingKey) var wordHighlightingEnabled: Bool = false
+    /// When on, opening a different audiobook leaves the current one playing
+    /// in the background instead of switching. See `AudioCoordinator`.
+    @AppStorage(AppSettings.backgroundAudioKey) var backgroundAudioEnabled: Bool = false
     @AppStorage(AppSettings.animationsEnabledKey) var animationsEnabled: Bool = true
     @State var currentPageIndex: Int = 0
     @State var sidebarTab: SidebarTab = .chapters
@@ -183,10 +195,9 @@ struct ReaderView: View {
         }
         .onDisappear {
             saveProgressIfNeeded(force: true)
-            // Each ReaderView owns its own engine, so audio left playing
-            // after the pop would overlap with the next book's engine.
-            // Listen-while-browsing needs a single shared engine first.
-            engine.pause()
+            // The engine is shared and app-owned now: leave playback running
+            // so it continues in the library (the mini-player + lock screen
+            // drive it). No pause-on-pop.
         }
         .task(id: book.id) {
             await loadEverything()
@@ -1154,6 +1165,10 @@ struct ReaderView: View {
     /// Gated so it never fights a manual turn, a drag, or a restore.
     func followNarration() {
         #if os(iOS)
+        // Only follow when the engine is narrating THIS book — in background
+        // mode it may be playing a different one, whose timeline says nothing
+        // about this book's pages.
+        guard audioIsThisBook else { return }
         guard wordHighlightingEnabled, engine.state == .playing else { return }
         guard !isRestoringProgress else { return }
         if let until = followState.suspendedUntil, Date() < until { return }
@@ -1201,7 +1216,9 @@ struct ReaderView: View {
     }
 
     func refreshActiveWord() {
-        guard !denseWords.isEmpty else {
+        // No highlight unless the engine is narrating THIS book — otherwise
+        // `engine.currentTime` belongs to a different book's timeline.
+        guard !denseWords.isEmpty, audioIsThisBook else {
             if activeWordTracker.current != nil { activeWordTracker.current = nil }
             return
         }
@@ -1631,7 +1648,12 @@ struct ReaderView: View {
             } else {
                 currentPageIndex = max(0, progress.currentPageIndex)
             }
-            if progress.currentAudioSeconds > 0 {
+            // Only move the audio playhead if the engine is actually loaded
+            // with THIS book — in background mode it may be mid-playback on
+            // another book, and seeking it to our saved position would hijack
+            // that. A book freshly loaded by `present` starts at 0, so this
+            // restores its position; a book already playing keeps its place.
+            if progress.currentAudioSeconds > 0, audioIsThisBook, engine.state != .playing {
                 engine.seek(to: progress.currentAudioSeconds)
             }
         } else if selectedSegmentID == nil {
@@ -1677,7 +1699,7 @@ struct ReaderView: View {
             let new = ReadingProgress(
                 book: book,
                 currentCFI: segmentID,
-                currentAudioSeconds: engine.currentTime,
+                currentAudioSeconds: audioIsThisBook ? engine.currentTime : 0,
                 currentPageIndex: currentPageIndex,
                 lastReadAt: .now
             )
@@ -1691,7 +1713,11 @@ struct ReaderView: View {
         }
 
         progress.currentCFI = segmentID
-        progress.currentAudioSeconds = engine.currentTime
+        // Only record the audio playhead when the engine is on this book —
+        // in background mode it may be narrating a different one.
+        if audioIsThisBook {
+            progress.currentAudioSeconds = engine.currentTime
+        }
         progress.currentPageIndex = currentPageIndex
         // Budget-independent anchor (see ReadingProgress.firstWordIndex).
         if paginated, let segment = currentSegment,
@@ -1706,17 +1732,29 @@ struct ReaderView: View {
     }
 
     func loadAudioIfPresent() async {
-        guard let url = book.resolvedAudiobookURL else { return }
-        do {
-            try await engine.load(url: url)
-            engine.setNowPlayingMetadata(
-                title: book.title,
-                artist: book.author,
-                artworkData: book.coverImageData
-            )
-        } catch {
-            attachError = "Failed to load audio: \(error.localizedDescription)"
+        // The shared engine may already be playing this book (returned to it)
+        // or a different one (background mode). The coordinator decides
+        // whether to load/switch; it owns now-playing metadata too.
+        await audio.present(book: book, backgroundMode: backgroundAudioEnabled)
+    }
+
+    /// Background mode, another book playing, user wants THIS book now: switch
+    /// the shared engine to it, resume at its saved position, and play.
+    func activateThisBookAudio() {
+        Task { @MainActor in
+            guard await audio.switchTo(book: book) else { return }
+            if let secs = book.progress?.currentAudioSeconds, secs > 0 {
+                engine.seek(to: secs)
+            }
+            try? engine.play()
         }
+    }
+
+    /// Whether to offer "play this audiobook" instead of live transport: only
+    /// in background mode, when this book has audio but the shared engine is
+    /// currently loaded with a different book.
+    var showSwitchToAudioBar: Bool {
+        book.audiobookFileURL != nil && backgroundAudioEnabled && !audioIsThisBook && audio.hasAudio
     }
 
     func loadAlignmentIfPresent() {
@@ -1870,14 +1908,11 @@ struct ReaderView: View {
                     // open.
                     alignmentMap = nil
                     rebuildAnchorIndex()
-                    if let stored = book.resolvedAudiobookURL {
-                        try await engine.load(url: stored)
-                        engine.setNowPlayingMetadata(
-                            title: book.title,
-                            artist: book.author,
-                            artworkData: book.coverImageData
-                        )
-                    }
+                    // The audiobook file changed on disk; force the shared
+                    // engine to drop and reload it (a plain present() would
+                    // no-op since the bookID is unchanged).
+                    audio.unload(ifBookID: book.id)
+                    await audio.switchTo(book: book)
                 } catch {
                     attachError = error.localizedDescription
                 }

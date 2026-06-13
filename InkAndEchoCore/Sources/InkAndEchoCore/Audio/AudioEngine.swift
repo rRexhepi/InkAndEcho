@@ -424,6 +424,25 @@ public final class AudioEngine {
         updateNowPlayingPlayback()
     }
 
+    /// Fully unload: stop the player, drop the file, reset to idle, and clear
+    /// the lock-screen tile. Used when the shared engine's book is deleted or
+    /// its audiobook replaced — a clean slate before the next `load`.
+    public func stop() {
+        player.stop()
+        stopDisplayTimer()
+        audioFile = nil
+        audioURL = nil
+        currentTime = 0
+        duration = 0
+        seekOffsetSeconds = 0
+        baselineSampleTime = 0
+        state = .idle
+        #if os(iOS) || targetEnvironment(macCatalyst)
+        MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
+        #endif
+        nowPlayingBase = [:]
+    }
+
     public func seek(to time: TimeInterval) {
         guard audioFile != nil else { return }
         let wasPlaying = (state == .playing)

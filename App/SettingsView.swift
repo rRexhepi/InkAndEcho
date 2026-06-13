@@ -27,6 +27,9 @@ enum AppSettings {
     static let defaultHighlightColorKey = "inkandecho.defaultHighlightColor"
     /// Tint each word as the audiobook narrates it (read-along).
     static let wordHighlightingKey = "inkandecho.wordHighlighting"
+    /// Keep the current audiobook playing when you open a different book,
+    /// instead of switching the shared engine to the new one.
+    static let backgroundAudioKey = "inkandecho.backgroundAudio"
 
     static func defaultHighlightColor() -> AnnotationColor {
         let raw = UserDefaults.standard.string(forKey: defaultHighlightColorKey) ?? AnnotationColor.amber.rawValue
@@ -39,6 +42,7 @@ struct SettingsView: View {
     @AppStorage(AppSettings.animationsEnabledKey) private var animationsEnabled: Bool = true
     @AppStorage(AppSettings.defaultHighlightColorKey) private var defaultHighlightColorRaw: String = AnnotationColor.amber.rawValue
     @AppStorage(AppSettings.wordHighlightingKey) private var wordHighlightingEnabled: Bool = false
+    @AppStorage(AppSettings.backgroundAudioKey) private var backgroundAudioEnabled: Bool = false
 
     private var theme: Binding<ThemeChoice> {
         Binding(
@@ -73,6 +77,13 @@ struct SettingsView: View {
             Section("Read-along") {
                 Toggle("Highlight the spoken word", isOn: $wordHighlightingEnabled)
                 Text("Tints each word as the audiobook narrates it. Needs an aligned audiobook.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            Section("Playback") {
+                Toggle("Keep playing across books", isOn: $backgroundAudioEnabled)
+                Text("Audiobooks keep playing when you leave a book. On: opening another book leaves the current one playing in the background. Off: opening another audiobook switches to it.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }

@@ -13,6 +13,7 @@
 		3819950BC9147A812B831006 /* HighlightableTextView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA3F84C246400BD4A5B153EE /* HighlightableTextView.swift */; };
 		3FB202EB9CF0EF8F707C1464 /* OnboardingView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 74FAB22F0AFFEAA72274161E /* OnboardingView.swift */; };
 		442D73EC2B72D3363369F952 /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = 172CE85348873DECD40D1E55 /* PrivacyInfo.xcprivacy */; };
+		5E96FA23A911C3C6CCA1BA9E /* AudioCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = A0D6E262A776A2E4ACE1BCF0 /* AudioCoordinator.swift */; };
 		6AE2A904C9FF79AA215105FC /* ParagraphRow.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6D66AA5105FAB49C6890973B /* ParagraphRow.swift */; };
 		7692D7E86E62D225F5AC52B2 /* AnnotationsListSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5D6D732825890C6C364C9CCC /* AnnotationsListSheet.swift */; };
 		879B357CC8C9D0EB9E7E077E /* LibraryView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6A9DFB6DC24420D6E9F7D75B /* LibraryView.swift */; };
@@ -50,6 +51,7 @@
 		92C483244FFA8A3AF439FA53 /* ReaderView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReaderView.swift; sourceTree = "<group>"; };
 		9402BA1F7677CF7925C21474 /* ImportService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ImportService.swift; sourceTree = "<group>"; };
 		97774731905DC84D1F3E986B /* ReaderView+iOS.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "ReaderView+iOS.swift"; sourceTree = "<group>"; };
+		A0D6E262A776A2E4ACE1BCF0 /* AudioCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AudioCoordinator.swift; sourceTree = "<group>"; };
 		AA3F84C246400BD4A5B153EE /* HighlightableTextView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HighlightableTextView.swift; sourceTree = "<group>"; };
 		AFF009345723E68F5306F679 /* AlignmentService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AlignmentService.swift; sourceTree = "<group>"; };
 		C1B14FAA2C38A4DB3FA4FCBA /* InkAndEchoCore */ = {isa = PBXFileReference; lastKnownFileType = folder; name = InkAndEchoCore; path = InkAndEchoCore; sourceTree = SOURCE_ROOT; };
@@ -105,6 +107,7 @@
 				AFF009345723E68F5306F679 /* AlignmentService.swift */,
 				F3A872832608CF8CDE642DBB /* Assets.xcassets */,
 				6375515AC3F41DBA03C0DA29 /* AudioBarTouchView.swift */,
+				A0D6E262A776A2E4ACE1BCF0 /* AudioCoordinator.swift */,
 				12A7C200EA73136ABF2B9E9F /* BookFileResolution.swift */,
 				9402BA1F7677CF7925C21474 /* ImportService.swift */,
 				418FCE68125418C6205A2B9B /* InfoiOS.plist */,
@@ -215,6 +218,7 @@
 				E30334F8FAF90446B2260AD8 /* AlignmentService.swift in Sources */,
 				7692D7E86E62D225F5AC52B2 /* AnnotationsListSheet.swift in Sources */,
 				13B13199ABFD53ED945DD0E3 /* AudioBarTouchView.swift in Sources */,
+				5E96FA23A911C3C6CCA1BA9E /* AudioCoordinator.swift in Sources */,
 				2B0EF7294502444D7C850769 /* BookFileResolution.swift in Sources */,
 				3819950BC9147A812B831006 /* HighlightableTextView.swift in Sources */,
 				BC5CFA84EFBFD6AFC91B790E /* ImportService.swift in Sources */,
