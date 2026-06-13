@@ -182,6 +182,22 @@ class Aligner {
         }
       }
       if (found >= 0) {
+        // Reject candidates that leap far past the position the running
+        // book<->audio cadence predicts (~1 audio word per book word). A
+        // far-ahead candidate means the matcher found a LATER occurrence
+        // of this word (e.g. the next chapter's heading because the ASR
+        // mis-heard this chapter's). Accepting it is fatal: the cursor is
+        // monotonic, so every genuine match in the skipped span becomes
+        // unreachable. The first anchor stays unbounded (narrator
+        // preambles). 200 audio words ~= 80s still tolerates asides.
+        // (Swift parity: WhisperAligner.findAnchorPairs.)
+        if (pairs.isNotEmpty) {
+          final last = pairs.last;
+          final expected = last.audioIdx + (bookIdx - last.bookIdx);
+          if (found - expected > 200) {
+            continue; // skip this book word; cursor stays put
+          }
+        }
         pairs.add(_AnchorPair(bookIdx, found));
         audioCursor = found + 1;
       }
@@ -279,8 +295,15 @@ List<String> _tokenizeWords(String text) =>
 
 final RegExp _punctOrSpace = RegExp(r'^[\s\p{P}]+|[\s\p{P}]+$', unicode: true);
 
-String _normalizeWord(String w) =>
-    w.replaceAll(_punctOrSpace, '').toLowerCase();
+/// Fold typographic apostrophes to ASCII before edge-trimming: typeset
+/// EPUBs write "don’t" while Whisper emits "don't"; the interior
+/// character survives trimming, so without the fold no contraction in such
+/// books ever matches an audio word. (Swift parity: normalizeWord.)
+String _normalizeWord(String w) => w
+    .replaceAll('’', "'")
+    .replaceAll('‘', "'")
+    .replaceAll(_punctOrSpace, '')
+    .toLowerCase();
 
 /// Approximate sentence boundary detection. Foundation's
 /// `enumerateSubstrings(.bySentences)` is locale-aware and ICU-backed; Dart's

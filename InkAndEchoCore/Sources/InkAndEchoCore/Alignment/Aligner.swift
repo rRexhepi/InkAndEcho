@@ -75,11 +75,26 @@ public struct WhisperAligner: AudioTextAligner {
 
         var audioWords: [AudioWord] = []
         var loadCursor: Double = 0
-        while loadCursor < max(totalAudioSeconds, loadChunkSeconds) {
+        // `totalAudioSeconds <= 0` means the duration probe failed: take one
+        // full-chunk pass and bail via the in-loop break. With a known
+        // duration, loop strictly against it — comparing against
+        // `max(total, chunk)` re-entered the loop with an empty
+        // `chunkStart == chunkEnd` slice for any audio shorter than one
+        // chunk, and since the cursor never advances on an empty slice,
+        // sub-5-minute audiobooks spun the aligner forever.
+        while totalAudioSeconds <= 0 || loadCursor < totalAudioSeconds {
             let chunkStart = loadCursor
             let chunkEnd = totalAudioSeconds > 0
                 ? min(chunkStart + loadChunkSeconds, totalAudioSeconds)
                 : chunkStart + loadChunkSeconds
+            // Load PAST the seam: a hard cut at `chunkEnd` slices the word
+            // straddling it mid-phoneme, garbling it in both chunks. The
+            // tail overlap lets THIS chunk transcribe that word cleanly; the
+            // next chunk's re-transcription of the zone is dropped by the
+            // seam dedup below (Flutter aligner parity).
+            let loadEnd = totalAudioSeconds > 0
+                ? min(chunkEnd + Self.seamOverlapSeconds, totalAudioSeconds)
+                : chunkEnd
 
             let callback: TranscriptionCallback = { partial in
                 let snippet = String(partial.text.suffix(80))
@@ -110,13 +125,19 @@ public struct WhisperAligner: AudioTextAligner {
                 let samples = try AudioProcessor.loadAudioAsFloatArray(
                     fromPath: audioURL.path,
                     startTime: chunkStart,
-                    endTime: chunkEnd
+                    endTime: loadEnd
                 )
                 chunkResults = try await pipe.transcribe(
                     audioArray: samples,
                     decodeOptions: options,
                     callback: callback
                 )
+            } catch is CancellationError {
+                // The user cancelled the job. Wrapping this in
+                // `transcriptionFailed` would turn an intentional abort into
+                // an "Alignment failed" alert upstream — rethrow unchanged so
+                // the coordinator's CancellationError catch stays silent.
+                throw CancellationError()
             } catch {
                 throw AlignerError.transcriptionFailed(error.localizedDescription)
             }
@@ -124,9 +145,21 @@ public struct WhisperAligner: AudioTextAligner {
             for result in chunkResults {
                 for seg in result.segments {
                     for word in (seg.words ?? []) {
+                        let normalized = normalizeWord(word.word)
+                        let absStart = Double(word.start) + chunkStart
+                        // The head of this chunk re-covers the previous
+                        // chunk's tail overlap — drop re-transcriptions.
+                        if Self.isSeamDuplicate(
+                            text: normalized,
+                            startSeconds: absStart,
+                            chunkStart: chunkStart,
+                            recent: audioWords.suffix(50)
+                        ) {
+                            continue
+                        }
                         audioWords.append(AudioWord(
-                            text: normalizeWord(word.word),
-                            startSeconds: Double(word.start) + chunkStart,
+                            text: normalized,
+                            startSeconds: absStart,
                             endSeconds: Double(word.end) + chunkStart,
                             confidence: Float(word.probability)
                         ))
@@ -137,6 +170,11 @@ public struct WhisperAligner: AudioTextAligner {
             loadCursor = chunkEnd
             if totalAudioSeconds <= 0 { break }
         }
+
+        // Overlap zones can interleave slightly (chunk i's tail word may
+        // start after chunk i+1's first words); downstream walks assume
+        // time order, so settle it once here.
+        audioWords.sort { ($0.startSeconds, $0.endSeconds) < ($1.startSeconds, $1.endSeconds) }
 
         progress(.aligning)
 
@@ -275,6 +313,16 @@ public struct WhisperAligner: AudioTextAligner {
         var pairs: [(bookIdx: Int, audioIdx: Int)] = []
         var audioCursor = 0
         let searchHorizon = 800  // audio words
+        // How far past the cadence-predicted position a candidate may land
+        // before it's rejected as a false match. Narration runs ~1 audio
+        // word per book word, so a candidate hundreds of words early means
+        // the matcher found a LATER occurrence of this word (e.g. the next
+        // chapter's heading because Whisper mis-heard this chapter's).
+        // Accepting that leap is fatal: the cursor is monotonic, so every
+        // genuine match in the skipped span becomes unreachable — one
+        // mis-heard word used to desync the whole rest of the book.
+        // 200 audio words ≈ 80 s still tolerates narrator asides.
+        let maxLeapPastExpected = 200
 
         for (bookIdx, bw) in bookWords.enumerated() {
             guard bw.normalized.count >= 5 else { continue }
@@ -284,11 +332,37 @@ public struct WhisperAligner: AudioTextAligner {
             let end = min(audioCursor + searchHorizon, audio.count)
             guard audioCursor < end else { break }
             if let audioIdx = (audioCursor..<end).first(where: { audio[$0].text == bw.normalized }) {
+                // The first anchor is unbounded (narrators add preambles);
+                // after that, candidates must stay near the running cadence.
+                if let last = pairs.last {
+                    let expected = last.audioIdx + (bookIdx - last.bookIdx)
+                    if audioIdx - expected > maxLeapPastExpected {
+                        continue  // reject the leap; cursor stays put
+                    }
+                }
                 pairs.append((bookIdx, audioIdx))
                 audioCursor = audioIdx + 1
             }
         }
         return pairs
+    }
+
+    /// Seconds of audio loaded past each chunk boundary so seam-straddling
+    /// words transcribe cleanly in the earlier chunk.
+    static let seamOverlapSeconds: Double = 2
+
+    /// True when a word at the head of a chunk is a re-transcription of a
+    /// word the previous chunk's tail overlap already emitted: it falls
+    /// inside the overlap zone and matches an emitted word by normalized
+    /// text within ±0.5 s. Pure function for testability.
+    static func isSeamDuplicate(
+        text: String,
+        startSeconds: Double,
+        chunkStart: Double,
+        recent: ArraySlice<AudioWord>
+    ) -> Bool {
+        guard chunkStart > 0, startSeconds < chunkStart + seamOverlapSeconds else { return false }
+        return recent.contains { $0.text == text && abs($0.startSeconds - startSeconds) <= 0.5 }
     }
 
     /// Dense per-book-word start times for read-along highlighting. The sparse
@@ -330,12 +404,22 @@ public struct WhisperAligner: AudioTextAligner {
             }
         }
 
-        // Fill: clamp head/tail to the first/last known time, linearly
-        // interpolate interior runs between matched neighbours.
+        // Fill: walk the head backward from the first known time (clamping it
+        // flat would make the strictly-increasing pass below cascade +1 ms per
+        // head word THROUGH the anchor, displacing every real time after it —
+        // a book with a few hundred unnarrated front-matter words would shift
+        // the opening chapter's highlight by that many milliseconds). Tail
+        // clamps to the last known time; interior runs linearly interpolate
+        // between matched neighbours.
         let knownIdx = (0..<n).filter { known[$0] != nil }
         guard let first = knownIdx.first, let last = knownIdx.last else { return [] }
         var times = [Double](repeating: 0, count: n)
-        for i in 0...first { times[i] = known[first]! }
+        times[first] = known[first]!
+        if first > 0 {
+            for i in stride(from: first - 1, through: 0, by: -1) {
+                times[i] = times[i + 1] - 0.001
+            }
+        }
         for k in 0..<(knownIdx.count - 1) {
             let a = knownIdx[k], b = knownIdx[k + 1]
             let ta = known[a]!, tb = known[b]!
@@ -496,7 +580,15 @@ private func tokenizeWords(_ text: String) -> [String] {
 }
 
 private func normalizeWord(_ word: String) -> String {
-    let stripped = word.trimmingCharacters(
+    // Fold typographic apostrophes to ASCII before comparing: typeset EPUBs
+    // write "don’t" (U+2019) while Whisper's vocabulary emits "don't".
+    // Interior characters survive edge-trimming, so without the fold no
+    // contraction in such books can ever match an audio word — they all
+    // drop out of anchoring and gap-matching.
+    let folded = word
+        .replacingOccurrences(of: "\u{2019}", with: "'")
+        .replacingOccurrences(of: "\u{2018}", with: "'")
+    let stripped = folded.trimmingCharacters(
         in: CharacterSet.punctuationCharacters.union(.whitespacesAndNewlines)
     )
     return stripped.lowercased()
