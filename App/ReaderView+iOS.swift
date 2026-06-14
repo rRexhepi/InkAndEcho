@@ -43,6 +43,22 @@ extension ReaderView {
                     flipController: $iosFlipController,
                     animationsEnabled: animationsEnabled
                 )
+                // Report the live page-surface size so pagination can break by
+                // measured text height (single-page only; spread keeps the word
+                // budget). Capturing the anchor word before the size lands keeps
+                // the reading position across a resize.
+                .background(
+                    GeometryReader { proxy in
+                        Color.clear.preference(key: PageAreaSizeKey.self, value: proxy.size)
+                    }
+                )
+                .onPreferenceChange(PageAreaSizeKey.self) { size in
+                    guard size != .zero, !useSpread else { return }
+                    if readerPageArea != .zero, readerPageArea != size {
+                        pendingAnchorWord = currentPageFirstWord()
+                    }
+                    readerPageArea = size
+                }
                 // Re-create the container whenever the boundary budget OR
                 // spread mode flips so UIPageViewController throws away its
                 // cached view controllers and rebuilds for the new layout.
@@ -54,7 +70,7 @@ extension ReaderView {
                 // identity change explicitly. Without it the action saves
                 // but the page looks unchanged until you flip away and back
                 // — or worse, until you relaunch the app.
-                .id("curl-\(useSpread ? "spread" : "single")-\(flatBoundariesBudget)-\(segments.count)-\(annotationRevision)-ra\(wordHighlightingEnabled ? 1 : 0)")
+                .id("curl-\(useSpread ? "spread" : "single")-\(flatBoundariesBudget)-\(flatBoundariesAreaKey)-\(segments.count)-\(annotationRevision)-ra\(wordHighlightingEnabled ? 1 : 0)")
                 .clipShape(RoundedRectangle(cornerRadius: 6))
                 .overlay(
                     RoundedRectangle(cornerRadius: 6)
@@ -91,7 +107,7 @@ extension ReaderView {
             iosFlipController?(true)
             return .handled
         }
-        .task(id: "\(segments.count)-\(useSpread)") {
+        .task(id: "\(segments.count)-\(useSpread)-\(pageAreaKey)") {
             recomputeFlatPageBoundaries(useSpread: useSpread)
         }
     }
@@ -119,7 +135,7 @@ extension ReaderView {
         else {
             return AnyView(Color(uiColor: .systemBackground))
         }
-        let pages = pageBreaks(for: segment.text, wordsPerPage: flatBoundariesBudget)
+        let pages = paginatedPages(for: segment)
         let safeIdx = max(0, min(mapping.pageIdx, pages.count - 1))
         guard pages.indices.contains(safeIdx) else {
             return AnyView(Color(uiColor: .systemBackground))

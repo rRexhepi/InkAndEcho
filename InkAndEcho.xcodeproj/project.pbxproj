@@ -25,6 +25,7 @@
 		B71DCBC65E976EFB410364FA /* ReaderView+iOS.swift in Sources */ = {isa = PBXBuildFile; fileRef = 97774731905DC84D1F3E986B /* ReaderView+iOS.swift */; };
 		BC5CFA84EFBFD6AFC91B790E /* ImportService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9402BA1F7677CF7925C21474 /* ImportService.swift */; };
 		BF209211B8694C667CF3BE58 /* InkAndEchoApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = D89DD8DB05E63EF2FDDC850B /* InkAndEchoApp.swift */; };
+		CC2E506910303348B442C6FE /* MeasuredPagination.swift in Sources */ = {isa = PBXBuildFile; fileRef = D4543139BB7F992AF866A8F8 /* MeasuredPagination.swift */; };
 		D041ECEF9633D7127E1F5650 /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F34FE67BFB0A6FB7ED30611D /* SettingsView.swift */; };
 		E2E3653DDE4DE2A61136804E /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = F3A872832608CF8CDE642DBB /* Assets.xcassets */; };
 		E30334F8FAF90446B2260AD8 /* AlignmentService.swift in Sources */ = {isa = PBXBuildFile; fileRef = AFF009345723E68F5306F679 /* AlignmentService.swift */; };
@@ -56,6 +57,7 @@
 		AFF009345723E68F5306F679 /* AlignmentService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AlignmentService.swift; sourceTree = "<group>"; };
 		C1B14FAA2C38A4DB3FA4FCBA /* InkAndEchoCore */ = {isa = PBXFileReference; lastKnownFileType = folder; name = InkAndEchoCore; path = InkAndEchoCore; sourceTree = SOURCE_ROOT; };
 		C4D405BF62C960DE1626F07F /* InkAndEcho.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = InkAndEcho.entitlements; sourceTree = "<group>"; };
+		D4543139BB7F992AF866A8F8 /* MeasuredPagination.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MeasuredPagination.swift; sourceTree = "<group>"; };
 		D89DD8DB05E63EF2FDDC850B /* InkAndEchoApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InkAndEchoApp.swift; sourceTree = "<group>"; };
 		F34FE67BFB0A6FB7ED30611D /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
 		F3A872832608CF8CDE642DBB /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
@@ -114,6 +116,7 @@
 				C4D405BF62C960DE1626F07F /* InkAndEcho.entitlements */,
 				D89DD8DB05E63EF2FDDC850B /* InkAndEchoApp.swift */,
 				6A9DFB6DC24420D6E9F7D75B /* LibraryView.swift */,
+				D4543139BB7F992AF866A8F8 /* MeasuredPagination.swift */,
 				876E66FBA08225DB00568605 /* MigrationGate.swift */,
 				2072F1CE4A465B80C6DCA2D2 /* MigrationImporter.swift */,
 				74FAB22F0AFFEAA72274161E /* OnboardingView.swift */,
@@ -224,6 +227,7 @@
 				BC5CFA84EFBFD6AFC91B790E /* ImportService.swift in Sources */,
 				BF209211B8694C667CF3BE58 /* InkAndEchoApp.swift in Sources */,
 				879B357CC8C9D0EB9E7E077E /* LibraryView.swift in Sources */,
+				CC2E506910303348B442C6FE /* MeasuredPagination.swift in Sources */,
 				A758C17FD26325288B782C58 /* MigrationGate.swift in Sources */,
 				E94BC66FEAB13FE123A368C8 /* MigrationImporter.swift in Sources */,
 				3FB202EB9CF0EF8F707C1464 /* OnboardingView.swift in Sources */,

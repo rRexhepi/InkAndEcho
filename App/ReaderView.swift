@@ -135,6 +135,22 @@ struct ReaderView: View {
     /// This is the mode the curl is REALLY in — follow's spread-visibility
     /// math keys off it rather than any layout-path-local flag.
     @State var flatBoundariesUseSpread: Bool = false
+    /// Live pixel size of one page surface, reported by the curl container.
+    /// Drives measured-height pagination; `.zero` until the first layout
+    /// (paginator falls back to the word budget meanwhile).
+    @State var readerPageArea: CGSize = .zero
+    /// Geometry signature the flat boundaries were paginated at. A change
+    /// (rotation, keyboard inset) invalidates page indices the same way a
+    /// budget change does.
+    @State var flatBoundariesAreaKey: Int = 0
+    /// First word of the current page, captured under the OLD geometry the
+    /// instant before it changes, so the reading position survives a
+    /// re-pagination. Consumed once by `recomputeFlatPageBoundaries`.
+    @State var pendingAnchorWord: Int?
+    /// Memoized measured paginations, shared by page building, the read-along
+    /// lookup, and the flat-boundary count so a chapter is measured once per
+    /// geometry rather than on every page flip.
+    @State var paginationCache = PaginationCache()
 
     var body: some View {
         readerLayout
@@ -922,6 +938,81 @@ struct ReaderView: View {
         #endif
     }
 
+    /// Stable integer signature of the current page-surface size, used to key
+    /// caches and detect when a re-pagination is needed.
+    var pageAreaKey: Int {
+        Int(readerPageArea.width.rounded()) &* 100_003 &+ Int(readerPageArea.height.rounded())
+    }
+
+    #if os(iOS)
+    /// Translate the live page-surface size into a measured-pagination budget,
+    /// matching `pageSurface`'s layout exactly: column = page width minus the
+    /// horizontal book margin (capped on iPad), text width = column minus the
+    /// row's margin/actions chrome (and the indent for non-first rows), and the
+    /// paragraph block = page height minus the header, page number, paddings,
+    /// and a one-line safety margin that absorbs measurement drift and the
+    /// occasional highlight pill. Returns nil before the first layout or when
+    /// the surface is too small to paginate sensibly (falls back to the word
+    /// budget then).
+    func measuredPageGeometry() -> MeasuredPageGeometry? {
+        let area = readerPageArea
+        guard area.width > 1, area.height > 1 else { return nil }
+
+        let column = min(pageColumnMaxWidth, area.width - 2 * pageHorizontalPadding)
+        // ParagraphRow HStack: margin(16) + spacing(8) + text + spacing(8) + actions(22).
+        let rowChrome: CGFloat = 16 + 8 + 8 + 22
+        let indent: CGFloat = 16   // pageSurface adds this to every non-first row
+        let firstWidth = column - rowChrome
+        let bodyWidth = column - rowChrome - indent
+        guard firstWidth > 40, bodyWidth > 40 else { return nil }
+
+        let lineUnit = BodyTextMetrics.lineUnit
+        // chapterHeader (10pt semibold, one line) + its 24pt bottom padding.
+        let headerBlock = ceil(UIFont.systemFont(ofSize: 10, weight: .semibold).lineHeight) + 24
+        // Bottom-pinned page number (caption2 ≈ 11pt, one line).
+        let pageNumber = ceil(UIFont.systemFont(ofSize: 11).lineHeight)
+        let available = area.height
+            - pageVerticalPadding   // pageSurface top padding
+            - 40                    // pageSurface bottom padding
+            - headerBlock
+            - pageNumber
+            - lineUnit              // one-line safety margin
+        guard available > 3 * lineUnit else { return nil }
+
+        return MeasuredPageGeometry(
+            firstRowWidth: firstWidth,
+            bodyRowWidth: bodyWidth,
+            availableHeight: available,
+            paragraphSpacing: 16
+        )
+    }
+    #endif
+
+    /// The single pagination entry point. Uses measured-height pagination on
+    /// the iOS single-page surface once its size is known; otherwise (spread
+    /// mode, macOS, or pre-layout) falls back to the word budget. All three
+    /// consumers — page building, the read-along word→page map, and the flat
+    /// page count — route through here so they always agree, and results are
+    /// memoized per chapter + geometry.
+    func paginatedPages(for segment: TextSegment) -> [PageContent] {
+        #if os(iOS)
+        if !flatBoundariesUseSpread, let geometry = measuredPageGeometry() {
+            return paginationCache.pages(forKey: "m|\(segment.id)|\(pageAreaKey)") {
+                paginateByMeasuredHeight(
+                    paragraphs: paragraphs(of: segment.text),
+                    geometry: geometry,
+                    lineUnit: BodyTextMetrics.lineUnit,
+                    measure: { BodyTextMetrics.measuredHeight($0, width: $1) }
+                )
+            }
+        }
+        #endif
+        let budget = flatBoundariesBudget > 0 ? flatBoundariesBudget : wordsBudget(useSpread: flatBoundariesUseSpread)
+        return paginationCache.pages(forKey: "w|\(segment.id)|\(budget)|\(flatBoundariesUseSpread)") {
+            pageBreaks(for: segment.text, wordsPerPage: budget)
+        }
+    }
+
     @ViewBuilder
     func chapterHeader(for segment: TextSegment) -> some View {
         Text(displayChapterLabel(for: segment))
@@ -1127,7 +1218,10 @@ struct ReaderView: View {
     /// tick cap used to paper over.
     private func wordLayout(for segment: TextSegment) -> SegmentWordLayoutCache {
         let budget = flatBoundariesBudget > 0 ? flatBoundariesBudget : wordsBudget(useSpread: flatBoundariesUseSpread)
-        let key = "\(segment.id)|\(budget)|\(segment.text.count)"
+        // `pageAreaKey` is in the key so measured-mode page starts recompute
+        // when the surface resizes (rotation / keyboard), not just on a budget
+        // change.
+        let key = "\(segment.id)|\(budget)|\(pageAreaKey)|\(segment.text.count)"
         if wordLayoutCache.key != key {
             let paras = paragraphs(of: segment.text)
             var paragraphStarts: [Int] = []
@@ -1137,7 +1231,7 @@ struct ReaderView: View {
                 paragraphStarts.append(cumulative)
                 cumulative += tokenizeWords(para).count
             }
-            let pageStarts = pageBreaks(for: segment.text, wordsPerPage: budget).map { page in
+            let pageStarts = paginatedPages(for: segment).map { page in
                 page.paragraphs.first.map { paragraphStarts[$0.originalIndex] + $0.wordOffsetWithinParagraph } ?? 0
             }
             wordLayoutCache.update(key: key, paragraphStarts: paragraphStarts, pageStarts: pageStarts)
@@ -1158,6 +1252,15 @@ struct ReaderView: View {
     /// holding the word's own chunk, not the paragraph's first page.
     func pageIndex(forWordIndex wordIndex: Int, in segment: TextSegment) -> Int? {
         wordLayout(for: segment).pageIndex(forWord: wordIndex)
+    }
+
+    /// First chapter-global word index on the current page under the active
+    /// pagination. Captured before a re-pagination so the reading position can
+    /// be remapped onto the new page layout. (Internal so the iOS layout's
+    /// page-size observer can reach it; `wordLayout` itself is private.)
+    func currentPageFirstWord() -> Int? {
+        guard let segment = currentSegment else { return nil }
+        return wordLayout(for: segment).startWord(ofPage: currentPageIndex)
     }
 
     /// Keep the narrated word on screen while audio plays. Paginated: snap the
@@ -1536,25 +1639,32 @@ struct ReaderView: View {
     /// gap or reload — the iBooks continuous reading model.
     func recomputeFlatPageBoundaries(useSpread: Bool = false) {
         let budget = wordsBudget(useSpread: useSpread)
-        // Page indices don't survive a budget change — carry the position
+        // Page indices don't survive a re-pagination — carry the position
         // across as the current page's first WORD and remap it under the new
-        // budget below. This keeps the reading position stable through
-        // rotation / spread flips (and through the restore→spread-recompute
-        // sequence on open).
-        var anchorWord: Int?
-        if budget != flatBoundariesBudget, flatBoundariesBudget > 0,
-           paginated, let segment = currentSegment {
-            anchorWord = wordLayout(for: segment).startWord(ofPage: currentPageIndex)
-        }
+        // layout below. `pendingAnchorWord` was captured under the OLD geometry
+        // the instant before the surface resized; for spread flips with no
+        // prior capture, fall back to reading it now (still the old budget,
+        // since the new one isn't applied yet). Keeps the reading position
+        // stable through rotation / spread flips and the restore→recompute
+        // sequence on open.
+        let anchorWord = pendingAnchorWord
+            ?? ((budget != flatBoundariesBudget && flatBoundariesBudget > 0 && paginated)
+                ? currentPageFirstWord()
+                : nil)
+        pendingAnchorWord = nil
+
+        // Apply the new layout signature BEFORE paginating so `paginatedPages`
+        // (and its cache key) reflect the new spread mode / page geometry.
+        flatBoundariesBudget = budget
+        flatBoundariesUseSpread = useSpread
+        flatBoundariesAreaKey = pageAreaKey
 
         var result: [(String, Int)] = []
         for segment in segments {
-            let pages = pageBreaks(for: segment.text, wordsPerPage: budget)
+            let pages = paginatedPages(for: segment)
             result.append((segment.id, max(1, pages.count)))
         }
         flatPageBoundaries = result
-        flatBoundariesBudget = budget
-        flatBoundariesUseSpread = useSpread
 
         if let word = anchorWord, let segment = currentSegment,
            let page = pageIndex(forWordIndex: word, in: segment) {
