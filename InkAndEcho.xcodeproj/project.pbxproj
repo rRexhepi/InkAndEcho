@@ -251,7 +251,7 @@
 				CODE_SIGN_ENTITLEMENTS = App/InkAndEcho.entitlements;
 				CODE_SIGN_IDENTITY = "iPhone Developer";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 11;
+				CURRENT_PROJECT_VERSION = 12;
 				DERIVE_MACCATALYST_PRODUCT_BUNDLE_IDENTIFIER = NO;
 				DEVELOPMENT_TEAM = HA8444ZZH2;
 				ENABLE_PREVIEWS = YES;
@@ -262,7 +262,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 0.2.0;
+				MARKETING_VERSION = 0.2.1;
 				PRODUCT_BUNDLE_IDENTIFIER = com.rexhep.InkAndEcho;
 				PRODUCT_NAME = InkAndEcho;
 				SDKROOT = iphoneos;
@@ -406,7 +406,7 @@
 				CODE_SIGN_ENTITLEMENTS = App/InkAndEcho.entitlements;
 				CODE_SIGN_IDENTITY = "iPhone Developer";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 11;
+				CURRENT_PROJECT_VERSION = 12;
 				DERIVE_MACCATALYST_PRODUCT_BUNDLE_IDENTIFIER = NO;
 				DEVELOPMENT_TEAM = HA8444ZZH2;
 				ENABLE_PREVIEWS = YES;
@@ -417,7 +417,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 0.2.0;
+				MARKETING_VERSION = 0.2.1;
 				PRODUCT_BUNDLE_IDENTIFIER = com.rexhep.InkAndEcho;
 				PRODUCT_NAME = InkAndEcho;
 				SDKROOT = iphoneos;
