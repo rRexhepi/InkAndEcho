@@ -43,22 +43,6 @@ extension ReaderView {
                     flipController: $iosFlipController,
                     animationsEnabled: animationsEnabled
                 )
-                // Report the live page-surface size so pagination can break by
-                // measured text height (single-page only; spread keeps the word
-                // budget). Capturing the anchor word before the size lands keeps
-                // the reading position across a resize.
-                .background(
-                    GeometryReader { proxy in
-                        Color.clear.preference(key: PageAreaSizeKey.self, value: proxy.size)
-                    }
-                )
-                .onPreferenceChange(PageAreaSizeKey.self) { size in
-                    guard size != .zero, !useSpread else { return }
-                    if readerPageArea != .zero, readerPageArea != size {
-                        pendingAnchorWord = currentPageFirstWord()
-                    }
-                    readerPageArea = size
-                }
                 // Re-create the container whenever the boundary budget OR
                 // spread mode flips so UIPageViewController throws away its
                 // cached view controllers and rebuilds for the new layout.
@@ -89,6 +73,19 @@ extension ReaderView {
         }
         .frame(maxWidth: .infinity)
         .background(Theme.canvasCool)
+        // Measure the page-content SLOT (not the curling container) so a page
+        // curl — which transforms child pages and spams scene relayouts — can
+        // never report a changed size mid-gesture and re-paginate underneath
+        // the live UIPageViewController. The curl surface is this slot minus
+        // the container's fixed padding; derived + rounded in the handler.
+        .background(
+            GeometryReader { proxy in
+                Color.clear.preference(key: PageAreaSizeKey.self, value: proxy.size)
+            }
+        )
+        .onPreferenceChange(PageAreaSizeKey.self) { slot in
+            updateReaderPageArea(fromSlot: slot, useSpread: useSpread)
+        }
         .focusable()
         // Without explicitly taking focus, `onKeyPress` never fires —
         // arrow-key / space page turns on iPad keyboards and Catalyst
@@ -154,6 +151,23 @@ extension ReaderView {
                         .strokeBorder(Theme.hairlineStrong, lineWidth: 1)
                 )
         )
+    }
+
+    /// Derive the curl page-surface size from the page-content slot (slot minus
+    /// the curl container's fixed padding) and store it ROUNDED, so sub-point
+    /// layout flutter during a curl never bumps `pageAreaKey` and re-paginates
+    /// the live page controller. Captures the current page's first word before a
+    /// genuine resize so the reading position survives the re-pagination.
+    func updateReaderPageArea(fromSlot slot: CGSize, useSpread: Bool) {
+        let horizontalInset: CGFloat = useSpread ? 48 : 24   // .padding(.horizontal, 24|12) × 2
+        let verticalInset: CGFloat = 32                       // .padding(.vertical, 16) × 2
+        let area = CGSize(
+            width: max(0, (slot.width - horizontalInset).rounded()),
+            height: max(0, (slot.height - verticalInset).rounded())
+        )
+        guard area.width > 1, area.height > 1, area != readerPageArea else { return }
+        if readerPageArea != .zero { pendingAnchorWord = currentPageFirstWord() }
+        readerPageArea = area
     }
 
     // MARK: - iPad layout

@@ -84,18 +84,20 @@ struct PageCurlReaderContainer: UIViewControllerRepresentable {
     }
 
     func updateUIViewController(_ pvc: UIPageViewController, context: Context) {
+        // A user curl may be mid-flight (finger holding a half-turned page).
+        // Refreshing the coordinator's `parent` snapshot, re-applying gesture
+        // state, OR calling `setViewControllers` during that transition
+        // corrupts the pageCurl's internal state — and re-renders are frequent
+        // (narration-follow writes the bound index from 30 Hz audio ticks;
+        // measured pagination updates geometry), so this overlap is real, not
+        // theoretical. Touch NOTHING until the gesture finishes;
+        // `didFinishAnimating` flips the flag and the next update reconciles.
+        guard !context.coordinator.isUserTransitioning else { return }
         // Coordinator's `parent` is captured at init — refresh so toggles
-        // (animationsEnabled, etc.) reflect the latest struct snapshot.
+        // (animationsEnabled, page count, content) reflect the latest snapshot.
         context.coordinator.parent = self
         applyAnimationMode(to: pvc, coordinator: context.coordinator)
         guard totalPages > 0 else { return }
-        // A user curl may be mid-flight (finger holding a half-turned page).
-        // Calling `setViewControllers` during that transition corrupts the
-        // pageCurl's internal state — and narration-follow writes the bound
-        // index from audio ticks, so this is not a theoretical overlap.
-        // Skip; `didFinishAnimating` re-syncs the binding on completion and
-        // the next update reconciles.
-        guard !context.coordinator.isUserTransitioning else { return }
         let safe = max(0, min(currentIndex, totalPages - 1))
         let visible = pvc.viewControllers?.compactMap { ($0 as? IndexedHostingController)?.pageIndex } ?? []
         let animated = context.coordinator.consumeAnimatedFlip()
@@ -138,10 +140,14 @@ struct PageCurlReaderContainer: UIViewControllerRepresentable {
     }
 
     private func makePage(at index: Int) -> IndexedHostingController {
-        // Past-the-end = the filler back cover that squares off an odd page
-        // count in spread mode. Plain parchment, still indexed so the data
-        // source can navigate from it.
-        guard index < totalPages else {
+        // Out-of-range at EITHER edge = a blank parchment filler. Crucially the
+        // data source hands these back instead of nil, so a built-in pageCurl
+        // tap/pan at a boundary can never assemble 0 view controllers — the
+        // UIKit abort "The number of view controllers provided (0) doesn't
+        // match the number required (1)". It also squares off an odd page
+        // count's final spread. `didFinishAnimating` clamps the landing back
+        // onto a real page, so the curl simply bounces at the ends.
+        guard index >= 0, index < totalPages else {
             return IndexedHostingController(
                 pageIndex: index,
                 rootView: AnyView(Color(uiColor: Self.parchmentCanvasUIColor))
@@ -216,21 +222,14 @@ struct PageCurlReaderContainer: UIViewControllerRepresentable {
             return v
         }
 
-        /// Last index a gesture can land on. In spread mode an odd page
-        /// count is squared off with one blank filler so `.mid` spine always
-        /// has a pair — and so the final page is reachable by swipe at all.
-        private var lastNavigableIndex: Int {
-            parent.useSpread && parent.totalPages % 2 == 1
-                ? parent.totalPages       // the filler slot
-                : parent.totalPages - 1
-        }
-
         func pageViewController(
             _ pageViewController: UIPageViewController,
             viewControllerBefore viewController: UIViewController
         ) -> UIViewController? {
-            guard let current = viewController as? IndexedHostingController,
-                  current.pageIndex > 0 else { return nil }
+            guard let current = viewController as? IndexedHostingController else { return nil }
+            // Filler (never nil) below the first page — see `makePage`. A nil
+            // here is what aborts a boundary curl; the filler lets it bounce
+            // back via `didFinishAnimating`'s clamp instead.
             return parent.makePage(at: current.pageIndex - 1)
         }
 
@@ -238,8 +237,8 @@ struct PageCurlReaderContainer: UIViewControllerRepresentable {
             _ pageViewController: UIPageViewController,
             viewControllerAfter viewController: UIViewController
         ) -> UIViewController? {
-            guard let current = viewController as? IndexedHostingController,
-                  current.pageIndex < lastNavigableIndex else { return nil }
+            guard let current = viewController as? IndexedHostingController else { return nil }
+            // Filler (never nil) past the last page — see `makePage`.
             return parent.makePage(at: current.pageIndex + 1)
         }
 
@@ -260,10 +259,25 @@ struct PageCurlReaderContainer: UIViewControllerRepresentable {
             guard finished, completed,
                   let current = pageViewController.viewControllers?.first as? IndexedHostingController
             else { return }
-            // Clamp in case the visible left page is ever the filler.
-            let landed = min(current.pageIndex, parent.totalPages - 1)
-            // Defer so we don't re-enter the representable update path mid-animation.
+            let landed = max(0, min(current.pageIndex, parent.totalPages - 1))
+            let landedOnFiller = current.pageIndex != landed
+            // Defer everything out of this delegate callback. Calling
+            // `setViewControllers` synchronously from inside `didFinishAnimating`
+            // re-enters UIPageViewController's transition machinery and corrupts
+            // it (the displayed page desyncs from the binding and gestures wedge).
             DispatchQueue.main.async {
+                if landedOnFiller {
+                    // Curled onto a boundary filler past an end. Snap straight
+                    // back to the real page — the binding may already equal
+                    // `landed` (we curled off the last real page), so a SwiftUI
+                    // reconcile alone wouldn't replace the blank filler.
+                    self.parent.setControllers(
+                        on: pageViewController,
+                        animated: false,
+                        direction: .reverse,
+                        override: landed
+                    )
+                }
                 self.parent.currentIndex = landed
             }
         }
