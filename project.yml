@@ -55,7 +55,7 @@ targets:
       properties:
         CFBundleDisplayName: "Ink and Echo"
         CFBundleShortVersionString: "0.2.1"
-        CFBundleVersion: "12"
+        CFBundleVersion: "13"
         LSRequiresIPhoneOS: true
         LSApplicationCategoryType: public.app-category.education
         UIFileSharingEnabled: true
@@ -123,7 +123,7 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: com.rexhep.InkAndEcho
         PRODUCT_NAME: InkAndEcho
         MARKETING_VERSION: "0.2.1"
-        CURRENT_PROJECT_VERSION: "12"
+        CURRENT_PROJECT_VERSION: "13"
         SWIFT_VERSION: "6.0"
         TARGETED_DEVICE_FAMILY: "1,2"
         CODE_SIGN_STYLE: Automatic

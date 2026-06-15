@@ -314,15 +314,21 @@ public final class AudioEngine {
     private func configureRemoteCommands() {
         let center = MPRemoteCommandCenter.shared()
 
-        commandTokens.append((center.playCommand, center.playCommand.addTarget { [weak self] _ in
+        // Every handler is `@Sendable`: `AudioEngine` is `@MainActor`, so an
+        // unannotated closure here would be main-actor-isolated, and Swift's
+        // executor check traps if MediaPlayer ever invokes it off-main (the
+        // same class of crash as the now-playing artwork handler). They don't
+        // need the isolation — each only spawns a `Task { @MainActor }` and
+        // returns — so strip it and the off-main hazard goes with it.
+        commandTokens.append((center.playCommand, center.playCommand.addTarget { @Sendable [weak self] _ in
             Task { @MainActor [weak self] in try? self?.play() }
             return .success
         }))
-        commandTokens.append((center.pauseCommand, center.pauseCommand.addTarget { [weak self] _ in
+        commandTokens.append((center.pauseCommand, center.pauseCommand.addTarget { @Sendable [weak self] _ in
             Task { @MainActor [weak self] in self?.pause() }
             return .success
         }))
-        commandTokens.append((center.togglePlayPauseCommand, center.togglePlayPauseCommand.addTarget { [weak self] _ in
+        commandTokens.append((center.togglePlayPauseCommand, center.togglePlayPauseCommand.addTarget { @Sendable [weak self] _ in
             Task { @MainActor [weak self] in
                 guard let self else { return }
                 if self.state == .playing { self.pause() } else { try? self.play() }
@@ -330,7 +336,7 @@ public final class AudioEngine {
             return .success
         }))
         center.skipForwardCommand.preferredIntervals = [15]
-        commandTokens.append((center.skipForwardCommand, center.skipForwardCommand.addTarget { [weak self] _ in
+        commandTokens.append((center.skipForwardCommand, center.skipForwardCommand.addTarget { @Sendable [weak self] _ in
             Task { @MainActor [weak self] in
                 guard let self else { return }
                 self.seek(to: min(self.duration, self.currentTime + 15))
@@ -338,14 +344,14 @@ public final class AudioEngine {
             return .success
         }))
         center.skipBackwardCommand.preferredIntervals = [15]
-        commandTokens.append((center.skipBackwardCommand, center.skipBackwardCommand.addTarget { [weak self] _ in
+        commandTokens.append((center.skipBackwardCommand, center.skipBackwardCommand.addTarget { @Sendable [weak self] _ in
             Task { @MainActor [weak self] in
                 guard let self else { return }
                 self.seek(to: max(0, self.currentTime - 15))
             }
             return .success
         }))
-        commandTokens.append((center.changePlaybackPositionCommand, center.changePlaybackPositionCommand.addTarget { [weak self] event in
+        commandTokens.append((center.changePlaybackPositionCommand, center.changePlaybackPositionCommand.addTarget { @Sendable [weak self] event in
             guard let position = (event as? MPChangePlaybackPositionCommandEvent)?.positionTime else {
                 return .commandFailed
             }
@@ -353,6 +359,25 @@ public final class AudioEngine {
             return .success
         }))
     }
+
+    #if canImport(UIKit)
+    /// Lock-screen artwork. The request handler MUST be non-isolated:
+    /// MediaPlayer invokes it on its OWN background queue while assembling the
+    /// now-playing dictionary, and `AudioEngine` is `@MainActor`, so a plain
+    /// closure here is `@MainActor`-isolated — Swift's executor check then traps
+    /// (EXC_BREAKPOINT) the instant it runs off-main, crashing on every device
+    /// open of a book that has a cover. The simulator's now-playing stack never
+    /// calls the handler, so it only surfaces on-device. `@Sendable` strips the
+    /// isolation; the closure captures only the Sendable `Data` and re-decodes
+    /// per request (artwork is requested rarely; the cover is already
+    /// downsampled). `nonisolated static` so it's callable off the main actor.
+    nonisolated static func makeNowPlayingArtwork(from data: Data) -> MPMediaItemArtwork? {
+        guard let image = UIImage(data: data) else { return nil }
+        return MPMediaItemArtwork(boundsSize: image.size) { @Sendable _ in
+            UIImage(data: data) ?? UIImage()
+        }
+    }
+    #endif
 
     /// Set once per loaded book (title / author / cover); playback fields are
     /// layered on by `updateNowPlayingPlayback` whenever state changes.
@@ -363,8 +388,8 @@ public final class AudioEngine {
             MPNowPlayingInfoPropertyMediaType: MPNowPlayingInfoMediaType.audio.rawValue,
         ]
         #if canImport(UIKit)
-        if let artworkData, let image = UIImage(data: artworkData) {
-            info[MPMediaItemPropertyArtwork] = MPMediaItemArtwork(boundsSize: image.size) { _ in image }
+        if let artworkData, let artwork = Self.makeNowPlayingArtwork(from: artworkData) {
+            info[MPMediaItemPropertyArtwork] = artwork
         }
         #endif
         nowPlayingBase = info
