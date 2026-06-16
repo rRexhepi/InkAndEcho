@@ -54,7 +54,7 @@ targets:
       path: App/InfoiOS.plist
       properties:
         CFBundleDisplayName: "Ink and Echo"
-        CFBundleShortVersionString: "0.2.1"
+        CFBundleShortVersionString: "0.2.2"
         CFBundleVersion: "14"
         LSRequiresIPhoneOS: true
         LSApplicationCategoryType: public.app-category.education
@@ -122,7 +122,7 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.rexhep.InkAndEcho
         PRODUCT_NAME: InkAndEcho
-        MARKETING_VERSION: "0.2.1"
+        MARKETING_VERSION: "0.2.2"
         CURRENT_PROJECT_VERSION: "14"
         SWIFT_VERSION: "6.0"
         TARGETED_DEVICE_FAMILY: "1,2"
