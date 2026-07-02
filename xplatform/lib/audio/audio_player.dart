@@ -5,6 +5,10 @@ import 'package:audio_session/audio_session.dart';
 import 'package:flutter/foundation.dart';
 import 'package:just_audio/just_audio.dart' as ja;
 import 'package:just_audio_background/just_audio_background.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+
+/// Same key as the Apple build's `AppSettings.playbackRateKey`.
+const _kRatePref = 'inkandecho.playbackRate';
 
 bool get _isMobile => Platform.isAndroid || Platform.isIOS;
 
@@ -98,6 +102,17 @@ class InkAndEchoAudioPlayer extends ChangeNotifier {
         // background plugin not initialised — degrade to plain file source
         await _player.setFilePath(path);
       }
+      // Re-apply the persisted playback rate — a fresh player starts at 1x.
+      try {
+        final stored =
+            (await SharedPreferences.getInstance()).getDouble(_kRatePref);
+        if (stored != null && stored > 0) {
+          _rate = stored;
+          await _player.setSpeed(stored);
+        }
+      } catch (_) {
+        // prefs unavailable (tests) — session keeps the default rate
+      }
       _ready = true;
     } catch (_) {
       _ready = false;
@@ -137,6 +152,12 @@ class InkAndEchoAudioPlayer extends ChangeNotifier {
     _rate = rate;
     await _player.setSpeed(rate);
     notifyListeners();
+    try {
+      await (await SharedPreferences.getInstance())
+          .setDouble(_kRatePref, rate);
+    } catch (_) {
+      // prefs unavailable (tests) — rate still applies for this session
+    }
   }
 
   /// Start a sleep timer that pauses playback after `duration`. Pass null

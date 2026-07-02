@@ -72,6 +72,12 @@ final class AudioCoordinator {
     private func load(book: Book, url: URL) async -> Bool {
         do {
             try await engine.load(url: url)
+            // Re-apply the persisted playback rate: a fresh engine (app
+            // relaunch) is at 1×. `setRate` clamps and no-ops on same-rate.
+            let storedRate = UserDefaults.standard.double(forKey: AppSettings.playbackRateKey)
+            if storedRate > 0 {
+                engine.setRate(Float(storedRate))
+            }
             loadedBookID = book.id
             loadedTitle = book.title
             loadedAuthor = book.author

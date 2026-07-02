@@ -124,6 +124,7 @@ struct AudioBarTouchView: View {
             ForEach(rates, id: \.self) { rate in
                 Button {
                     engine.setRate(rate)
+                    UserDefaults.standard.set(Double(rate), forKey: AppSettings.playbackRateKey)
                 } label: {
                     HStack {
                         Text(formatRate(rate))

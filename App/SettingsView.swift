@@ -30,6 +30,10 @@ enum AppSettings {
     /// Keep the current audiobook playing when you open a different book,
     /// instead of switching the shared engine to the new one.
     static let backgroundAudioKey = "inkandecho.backgroundAudio"
+    /// Last playback rate the user picked. A preference, not book state —
+    /// re-applied by `AudioCoordinator.load` so a relaunch (fresh engine at
+    /// 1×) resumes at the listener's speed. Same key on the Flutter build.
+    static let playbackRateKey = "inkandecho.playbackRate"
 
     static func defaultHighlightColor() -> AnnotationColor {
         let raw = UserDefaults.standard.string(forKey: defaultHighlightColorKey) ?? AnnotationColor.amber.rawValue
