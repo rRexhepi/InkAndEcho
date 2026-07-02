@@ -318,7 +318,9 @@ extension ReaderView {
                 onAlign: alignmentRunning ? nil : { runAlignment() },
                 alignmentExists: alignmentMap != nil,
                 onRequestExpand: nil,
-                chapterEndTime: { currentChapterEndSeconds() }
+                chapterEndTime: { currentChapterEndSeconds() },
+                loadError: audioLoadErrorMessage,
+                onRetry: { retryAudioLoad() }
             )
         } else {
             attachAudiobookBar
@@ -524,7 +526,9 @@ extension ReaderView {
                 compact: true,
                 onAlign: nil,
                 alignmentExists: alignmentMap != nil,
-                onRequestExpand: { iosShowAudioSheet = true }
+                onRequestExpand: { iosShowAudioSheet = true },
+                loadError: audioLoadErrorMessage,
+                onRetry: { retryAudioLoad() }
             )
         } else {
             attachAudiobookBar
@@ -619,7 +623,9 @@ extension ReaderView {
                 onAlign: alignmentRunning ? nil : { runAlignment() },
                 alignmentExists: alignmentMap != nil,
                 onRequestExpand: nil,
-                chapterEndTime: { currentChapterEndSeconds() }
+                chapterEndTime: { currentChapterEndSeconds() },
+                loadError: audioLoadErrorMessage,
+                onRetry: { retryAudioLoad() }
             )
             .background(Color.clear)
             Spacer(minLength: 0)

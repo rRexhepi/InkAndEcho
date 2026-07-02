@@ -34,6 +34,17 @@ final class AudioCoordinator {
     private(set) var loadedAuthor: String = ""
     private(set) var loadedCoverData: Data?
 
+    /// Why the most recent load failed, keyed to the book it failed for.
+    /// A failed `switchTo`/`present` used to be silent — the bar just showed
+    /// a disabled play button with no explanation and no way to retry.
+    private(set) var loadFailureMessage: String?
+    private var loadFailureBookID: UUID?
+
+    /// The failure message if the last load failure was for `book`.
+    func loadError(for book: Book) -> String? {
+        loadFailureBookID == book.id ? loadFailureMessage : nil
+    }
+
     /// True once any book's audio is loaded — drives the library mini-player.
     var hasAudio: Bool { loadedBookID != nil }
 
@@ -162,6 +173,8 @@ final class AudioCoordinator {
         cancelSleepTimer()
         do {
             try await engine.load(url: url)
+            loadFailureMessage = nil
+            loadFailureBookID = nil
             // Re-apply the persisted playback rate: a fresh engine (app
             // relaunch) is at 1×. `setRate` clamps and no-ops on same-rate.
             let storedRate = UserDefaults.standard.double(forKey: AppSettings.playbackRateKey)
@@ -179,7 +192,11 @@ final class AudioCoordinator {
             )
             return true
         } catch {
-            // Leave whatever was previously loaded untouched on failure.
+            // Leave whatever was previously loaded untouched on failure (the
+            // engine's open-before-touch guarantees its half) — but record
+            // why, so the audio bar can say so and offer Retry.
+            loadFailureMessage = error.localizedDescription
+            loadFailureBookID = book.id
             return false
         }
     }

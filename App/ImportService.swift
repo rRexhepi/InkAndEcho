@@ -84,6 +84,17 @@ struct ImportService {
         try? FileManager.default.removeItem(at: tempURL)
         try await Self.copyOffMain(from: url, to: tempURL)
 
+        // Probe BEFORE retiring anything: a file the engine can't open
+        // (DRM-protected m4b, corrupt download) must fail the attach while
+        // the user's working audiobook and its alignment are still on disk —
+        // otherwise it surfaces later as a dead play button.
+        do {
+            _ = try AVAudioFile(forReading: tempURL)
+        } catch {
+            try? FileManager.default.removeItem(at: tempURL)
+            throw ImportServiceError.unplayableAudio(error.localizedDescription)
+        }
+
         // New audio is safe — now retire the old audio and its alignment
         // (computed against the old audio's timestamps). The new pick may
         // have a different extension, so a same-name remove isn't enough.
@@ -150,6 +161,7 @@ struct ImportService {
 enum ImportServiceError: LocalizedError {
     case unsupportedFormat(String)
     case missingEbook
+    case unplayableAudio(String)
 
     var errorDescription: String? {
         switch self {
@@ -157,6 +169,8 @@ enum ImportServiceError: LocalizedError {
             return "Unsupported file type: .\(ext). Use .epub, .mobi, or .pdf."
         case .missingEbook:
             return "Book has no associated ebook file."
+        case .unplayableAudio(let detail):
+            return "This audio file can't be played — it may be DRM-protected or damaged. Your current audiobook was left untouched. (\(detail))"
         }
     }
 }

@@ -1,6 +1,23 @@
 import SwiftUI
 import InkAndEchoCore
 
+/// Reading-order sort shared by the sheet and the exporter — chapter order
+/// first (unresolvable locators last), paragraph order within.
+func annotationsInReadingOrder(_ annotations: [Annotation], segments: [TextSegment]) -> [Annotation] {
+    let segmentOrder = Dictionary(
+        segments.enumerated().map { ($0.element.id, $0.offset) },
+        uniquingKeysWith: { first, _ in first }
+    )
+    return annotations.sorted { a, b in
+        let aLoc = a.paragraphLocation
+        let bLoc = b.paragraphLocation
+        let aOrder = aLoc.flatMap { segmentOrder[$0.segmentID] } ?? Int.max
+        let bOrder = bLoc.flatMap { segmentOrder[$0.segmentID] } ?? Int.max
+        if aOrder != bOrder { return aOrder < bOrder }
+        return (aLoc?.paragraphIndex ?? 0) < (bLoc?.paragraphIndex ?? 0)
+    }
+}
+
 /// Modal sheet listing every annotation (highlight / bookmark / note) on
 /// the current book, sorted in reading order. Tapping a row jumps the
 /// reader to that paragraph via the `onJump` callback.
@@ -13,11 +30,14 @@ struct AnnotationsListSheet: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            HStack {
+            HStack(spacing: 16) {
                 Text("Annotations")
                     .font(.system(.title2, design: .serif))
                     .foregroundStyle(Theme.ink)
                 Spacer()
+                if !book.annotations.isEmpty {
+                    exportMenu
+                }
                 Button("Done") {
                     onDismiss()
                     dismiss()
@@ -80,16 +100,179 @@ struct AnnotationsListSheet: View {
         .padding(.vertical, 32)
     }
 
-    private var sortedAnnotations: [Annotation] {
-        let segmentOrder = Dictionary(segments.enumerated().map { ($0.element.id, $0.offset) }, uniquingKeysWith: { first, _ in first })
-        return book.annotations.sorted { a, b in
-            let aLoc = a.paragraphLocation
-            let bLoc = b.paragraphLocation
-            let aOrder = aLoc.flatMap { segmentOrder[$0.segmentID] } ?? Int.max
-            let bOrder = bLoc.flatMap { segmentOrder[$0.segmentID] } ?? Int.max
-            if aOrder != bOrder { return aOrder < bOrder }
-            return (aLoc?.paragraphIndex ?? 0) < (bLoc?.paragraphIndex ?? 0)
+    /// Both files are written when the menu opens — they're tiny, and
+    /// ShareLink needs a concrete item up front.
+    private var exportMenu: some View {
+        Menu {
+            let exporter = AnnotationExporter(book: book, segments: segments)
+            if let url = try? exporter.markdownFileURL() {
+                ShareLink(item: url) {
+                    Label("Export Markdown", systemImage: "doc.text")
+                }
+            }
+            if let url = try? exporter.jsonFileURL() {
+                ShareLink(item: url) {
+                    Label("Export JSON (with progress)", systemImage: "curlybraces")
+                }
+            }
+        } label: {
+            Image(systemName: "square.and.arrow.up")
+                .font(.system(size: 15, weight: .medium))
+                .foregroundStyle(Theme.inkSoft)
+                .frame(width: 32, height: 32)
+                .contentShape(Rectangle())
         }
+        .menuStyle(.borderlessButton)
+    }
+
+    private var sortedAnnotations: [Annotation] {
+        annotationsInReadingOrder(book.annotations, segments: segments)
+    }
+}
+
+/// Serializes a book's annotations for export — the user's escape hatch, so
+/// a store reset or lost device never takes their notes with it. Markdown
+/// for reading, JSON (with reading progress) for a recovery round-trip.
+@MainActor
+struct AnnotationExporter {
+    let book: Book
+    let segments: [TextSegment]
+
+    /// Markdown export written to tmp, for ShareLink.
+    func markdownFileURL() throws -> URL {
+        try write(Data(markdown().utf8), ext: "md")
+    }
+
+    /// JSON export written to tmp, for ShareLink.
+    func jsonFileURL() throws -> URL {
+        try write(jsonData(), ext: "json")
+    }
+
+    // MARK: - Markdown
+
+    func markdown() -> String {
+        var out = "# \(book.title)\n\nby \(book.author)\n"
+        var currentChapter: String?
+        for annotation in annotationsInReadingOrder(book.annotations, segments: segments) {
+            let chapter = chapterLabel(annotation)
+            if chapter != currentChapter {
+                out += "\n## \(chapter)\n\n"
+                currentChapter = chapter
+            }
+            let kind = annotation.kind.rawValue.capitalized
+            let place = annotation.paragraphLocation.map { "¶\($0.paragraphIndex + 1)" } ?? "?"
+            switch annotation.kind {
+            case .note:
+                out += "- **\(kind)** (\(place)): \(annotation.note)\n"
+                if let snippet = paragraphText(annotation) {
+                    out += "  > \(snippet)\n"
+                }
+            case .highlight, .bookmark:
+                out += "- **\(kind)** (\(place)): \(paragraphText(annotation) ?? "—")\n"
+            }
+        }
+        return out
+    }
+
+    // MARK: - JSON
+
+    private struct Payload: Encodable {
+        struct Item: Encodable {
+            let kind: String
+            let locator: String
+            let chapterIndex: Int?
+            let paragraphIndex: Int?
+            let color: String
+            let note: String
+            let snippet: String?
+            let createdAt: Date
+        }
+        struct Progress: Encodable {
+            let chapterID: String
+            let pageIndex: Int
+            let firstWordIndex: Int
+            let audioSeconds: Double
+            let lastReadAt: Date
+        }
+        let title: String
+        let author: String
+        let exportedAt: Date
+        let annotations: [Item]
+        let readingProgress: Progress?
+    }
+
+    func jsonData() -> Data {
+        let items = annotationsInReadingOrder(book.annotations, segments: segments).map { annotation in
+            Payload.Item(
+                kind: annotation.kind.rawValue,
+                locator: annotation.cfiStart,
+                chapterIndex: chapterIndex(annotation),
+                paragraphIndex: annotation.paragraphLocation?.paragraphIndex,
+                color: annotation.color.rawValue,
+                note: annotation.note,
+                snippet: paragraphText(annotation),
+                createdAt: annotation.createdAt
+            )
+        }
+        let progress = book.progress.map {
+            Payload.Progress(
+                chapterID: $0.currentCFI,
+                pageIndex: $0.currentPageIndex,
+                firstWordIndex: $0.firstWordIndex,
+                audioSeconds: $0.currentAudioSeconds,
+                lastReadAt: $0.lastReadAt
+            )
+        }
+        let payload = Payload(
+            title: book.title,
+            author: book.author,
+            exportedAt: .now,
+            annotations: items,
+            readingProgress: progress
+        )
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        // Encodable structs of plain values can't fail in practice; an empty
+        // object beats throwing through the share UI.
+        return (try? encoder.encode(payload)) ?? Data("{}".utf8)
+    }
+
+    // MARK: - Resolution
+
+    private func chapterIndex(_ annotation: Annotation) -> Int? {
+        guard let loc = annotation.paragraphLocation else { return nil }
+        return segments.firstIndex(where: { $0.id == loc.segmentID })
+    }
+
+    private func chapterLabel(_ annotation: Annotation) -> String {
+        guard let idx = chapterIndex(annotation) else { return "Unknown chapter" }
+        if let title = segments[idx].title?.trimmingCharacters(in: .whitespaces), !title.isEmpty {
+            return "Chapter \(idx + 1) · \(title)"
+        }
+        return "Chapter \(idx + 1)"
+    }
+
+    /// Same paragraph resolution the sheet rows use (importer maps `</p>`
+    /// to `\n\n`).
+    private func paragraphText(_ annotation: Annotation) -> String? {
+        guard let loc = annotation.paragraphLocation,
+              let segment = segments.first(where: { $0.id == loc.segmentID }) else { return nil }
+        let paras = segment.text.components(separatedBy: "\n\n")
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+        guard loc.paragraphIndex < paras.count else { return nil }
+        return paras[loc.paragraphIndex]
+    }
+
+    private func write(_ data: Data, ext: String) throws -> URL {
+        let safeTitle = book.title
+            .replacingOccurrences(of: "/", with: "-")
+            .replacingOccurrences(of: ":", with: "-")
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("\(safeTitle) annotations.\(ext)")
+        try data.write(to: url, options: .atomic)
+        return url
     }
 }
 

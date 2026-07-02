@@ -1888,6 +1888,24 @@ struct ReaderView: View {
         book.audiobookFileURL != nil && backgroundAudioEnabled && !audioIsThisBook && audio.hasAudio
     }
 
+    /// Message for the audio bar when THIS book's audio is unplayable: the
+    /// coordinator recorded a load failure for it, or (legacy path) the
+    /// engine itself sits in `.error` while loaded with it. nil = healthy.
+    var audioLoadErrorMessage: String? {
+        if let message = audio.loadError(for: book) { return message }
+        if audioIsThisBook, case .error(let message) = engine.state { return message }
+        return nil
+    }
+
+    /// Retry from the audio bar's error row. `switchTo` re-runs the failed
+    /// load (the failed book never became `loadedBookID`, so it won't no-op)
+    /// and clears the recorded failure on success.
+    func retryAudioLoad() {
+        Task { @MainActor in
+            await audio.switchTo(book: book)
+        }
+    }
+
     func loadAlignmentIfPresent() {
         let service = AlignmentService(modelContext: modelContext)
         alignmentMap = service.loadAlignmentMap(for: book)

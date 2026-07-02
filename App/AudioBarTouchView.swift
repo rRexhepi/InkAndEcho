@@ -17,6 +17,11 @@ struct AudioBarTouchView: View {
     /// menu's "End of chapter". A closure so it's read fresh when the menu
     /// opens; nil hides the option (no alignment, no data source).
     var chapterEndTime: (() -> TimeInterval?)? = nil
+    /// Why this book's audio failed to load (nil = healthy). When set, the
+    /// transport is replaced by the message plus Retry — the old behavior
+    /// was a dead or disabled play button with no explanation.
+    var loadError: String? = nil
+    var onRetry: (() -> Void)? = nil
 
     /// Sleep timer state lives on the app-level coordinator so it survives
     /// popping the reader and fires from the lock screen.
@@ -44,14 +49,21 @@ struct AudioBarTouchView: View {
                     .contentShape(Rectangle())
                     .onTapGesture { onRequestExpand?() }
             }
-            transportRow
-                .padding(.horizontal, 16)
-                .padding(.top, compact ? 6 : 12)
-                .padding(.bottom, compact ? 14 : 12)
-            if !compact {
-                pillRow
+            if let loadError {
+                errorRow(loadError)
                     .padding(.horizontal, 16)
-                    .padding(.bottom, 16)
+                    .padding(.top, compact ? 6 : 12)
+                    .padding(.bottom, compact ? 14 : 16)
+            } else {
+                transportRow
+                    .padding(.horizontal, 16)
+                    .padding(.top, compact ? 6 : 12)
+                    .padding(.bottom, compact ? 14 : 12)
+                if !compact {
+                    pillRow
+                        .padding(.horizontal, 16)
+                        .padding(.bottom, 16)
+                }
             }
         }
         .background(Theme.canvasCool)
@@ -129,6 +141,31 @@ struct AudioBarTouchView: View {
         }
         .buttonStyle(.plain)
         .disabled(engine.state == .idle || engine.state == .loading)
+    }
+
+    private func errorRow(_ message: String) -> some View {
+        HStack(spacing: 12) {
+            Image(systemName: "exclamationmark.triangle")
+                .font(.system(size: 16, weight: .semibold))
+                .foregroundStyle(Theme.accent)
+            Text(message)
+                .font(.system(size: 13))
+                .foregroundStyle(Theme.inkSoft)
+                .lineLimit(3)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            if let onRetry {
+                Button(action: onRetry) {
+                    Text("Retry")
+                        .font(.system(size: 13, weight: .medium))
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 8)
+                        .background(Theme.accent)
+                        .foregroundStyle(Theme.onAccent)
+                        .clipShape(Capsule())
+                }
+                .buttonStyle(.plain)
+            }
+        }
     }
 
     private func skipButton(seconds: TimeInterval, symbol: String) -> some View {

@@ -430,28 +430,28 @@ public final class AudioEngine {
     }
 
     public func load(url: URL) async throws {
+        // Open-before-touch: construct the file before mutating ANY state,
+        // and rethrow untouched. The old flow set `.loading`, and on failure
+        // nulled the file and dropped to `.error` — killing whatever book was
+        // playing. A failed load (undownloaded iCloud file, DRM'd m4b) must
+        // leave the current book playing with working controls: the
+        // engine-level half of AudioCoordinator's "leave previous untouched
+        // on failure" contract.
+        let file = try AVAudioFile(forReading: url)
         // A fade belonging to the previous book must not mute the new one.
         cancelFade()
         engine.mainMixerNode.outputVolume = 1
         state = .loading
-        do {
-            let file = try AVAudioFile(forReading: url)
-            audioFile = file
-            audioURL = url
-            duration = Double(file.length) / file.processingFormat.sampleRate
-            currentTime = 0
-            seekOffsetSeconds = 0
-            baselineSampleTime = 0
-            pauseWallClock = nil
-            scheduleFromStart()
-            state = .ready
-            updateNowPlayingPlayback()
-        } catch {
-            audioFile = nil
-            audioURL = nil
-            state = .error("Failed to load audio: \(error.localizedDescription)")
-            throw error
-        }
+        audioFile = file
+        audioURL = url
+        duration = Double(file.length) / file.processingFormat.sampleRate
+        currentTime = 0
+        seekOffsetSeconds = 0
+        baselineSampleTime = 0
+        pauseWallClock = nil
+        scheduleFromStart()
+        state = .ready
+        updateNowPlayingPlayback()
     }
 
     public func play() throws {
