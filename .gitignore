@@ -27,6 +27,7 @@ xcuserdata/
 # Project docs (local-only)
 HANDOFF.md
 TODO.md
+.claude/
 
 # Local env
 .env
