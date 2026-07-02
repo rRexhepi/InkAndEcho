@@ -1777,7 +1777,15 @@ struct ReaderView: View {
             // that. A book freshly loaded by `present` starts at 0, so this
             // restores its position; a book already playing keeps its place.
             if progress.currentAudioSeconds > 0, audioIsThisBook, engine.state != .playing {
-                engine.seek(to: progress.currentAudioSeconds)
+                // Cross-launch smart rewind: the engine's in-memory pause
+                // marker doesn't survive a relaunch, so derive the same
+                // contract from `lastReadAt`. This seek also clears the
+                // engine marker, so a stale in-session pause can't stack a
+                // second rewind on top when play is pressed.
+                let awayFor = Date.now.timeIntervalSince(progress.lastReadAt)
+                let rewind = awayFor >= AudioEngine.smartRewindAfter
+                    ? AudioEngine.smartRewindSeconds : 0
+                engine.seek(to: max(0, progress.currentAudioSeconds - rewind))
             }
         } else if selectedSegmentID == nil {
             selectedSegmentID = segments.first?.id

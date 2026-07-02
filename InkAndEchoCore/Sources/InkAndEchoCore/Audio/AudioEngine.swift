@@ -28,6 +28,12 @@ public final class AudioEngine {
     public static let minRate: Float = 0.5
     public static let maxRate: Float = 2.0
 
+    /// Smart rewind: resuming after at least `smartRewindAfter` of pause
+    /// jumps back `smartRewindSeconds` for re-context. Public so the reader's
+    /// cross-launch variant (restore from `lastReadAt`) shares the contract.
+    public static let smartRewindSeconds: TimeInterval = 8
+    public static let smartRewindAfter: TimeInterval = 5 * 60
+
     public private(set) var state: State = .idle
     public private(set) var duration: TimeInterval = 0
     public private(set) var currentTime: TimeInterval = 0
@@ -72,6 +78,13 @@ public final class AudioEngine {
     /// stop, and load; the canceller owns restoring the mixer volume so a
     /// user action mid-fade never leaves playback half-muted.
     private var fadeTask: Task<Void, Never>?
+
+    /// Wall-clock moment of the last pause, consumed (and cleared) by
+    /// `play()`'s smart rewind. Lives at engine level because lock-screen
+    /// resume routes straight to `play()` — App-layer placement would miss
+    /// the main case. Seek and stop clear it: the user chose a position
+    /// deliberately, so rewinding on the next play would fight them.
+    private var pauseWallClock: Date?
 
     /// Invalidated in `deinit` (legal: deinit has exclusive access to stored
     /// properties, and SwiftUI deallocates the engine on the main thread).
@@ -429,6 +442,7 @@ public final class AudioEngine {
             currentTime = 0
             seekOffsetSeconds = 0
             baselineSampleTime = 0
+            pauseWallClock = nil
             scheduleFromStart()
             state = .ready
             updateNowPlayingPlayback()
@@ -454,7 +468,16 @@ public final class AudioEngine {
         // audiobook "play again" behavior.
         if duration > 0, currentTime >= duration - 0.05 {
             seek(to: 0)
+        } else if let pausedAt = pauseWallClock,
+                  Date.now.timeIntervalSince(pausedAt) >= Self.smartRewindAfter {
+            // Smart rewind: a few seconds of re-context after a long break.
+            // The EOF rearm above wins (replay-from-start must start at 0),
+            // and a seek-then-play never lands here — seek cleared the marker.
+            // This seek runs with state != .playing, so its internal play
+            // path stays cold: no recursion.
+            seek(to: max(0, currentTime - Self.smartRewindSeconds))
         }
+        pauseWallClock = nil
         if !engine.isRunning {
             try engine.start()
         }
@@ -475,6 +498,7 @@ public final class AudioEngine {
         // never pops back to full volume audibly.
         engine.mainMixerNode.outputVolume = 1
         state = .paused
+        pauseWallClock = .now
         stopDisplayTimer()
         updateNowPlayingPlayback()
     }
@@ -527,6 +551,7 @@ public final class AudioEngine {
         duration = 0
         seekOffsetSeconds = 0
         baselineSampleTime = 0
+        pauseWallClock = nil
         state = .idle
         #if os(iOS) || targetEnvironment(macCatalyst)
         MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
@@ -536,6 +561,7 @@ public final class AudioEngine {
 
     public func seek(to time: TimeInterval) {
         guard audioFile != nil else { return }
+        pauseWallClock = nil
         let wasPlaying = (state == .playing)
         player.stop()
         let scheduled = scheduleSegment(at: time)
