@@ -13,8 +13,17 @@ struct AudioBarTouchView: View {
     var onAlign: (() -> Void)? = nil
     var alignmentExists: Bool = false
     var onRequestExpand: (() -> Void)? = nil
+    /// Narration end of the current chapter (audio seconds), for the sleep
+    /// menu's "End of chapter". A closure so it's read fresh when the menu
+    /// opens; nil hides the option (no alignment, no data source).
+    var chapterEndTime: (() -> TimeInterval?)? = nil
+
+    /// Sleep timer state lives on the app-level coordinator so it survives
+    /// popping the reader and fires from the lock screen.
+    @Environment(AudioCoordinator.self) private var audio
 
     private let rates: [Float] = [0.75, 1.0, 1.25, 1.5, 2.0]
+    private let sleepMinutes = [15, 30, 45, 60]
 
     var body: some View {
         VStack(spacing: 0) {
@@ -61,7 +70,7 @@ struct AudioBarTouchView: View {
     private var pillRow: some View {
         HStack(spacing: 8) {
             rateMenu
-            sleepPill
+            sleepMenu
             if let onAlign {
                 Button {
                     onAlign()
@@ -146,19 +155,52 @@ struct AudioBarTouchView: View {
         .menuStyle(.borderlessButton)
     }
 
-    private var sleepPill: some View {
-        // Sleep timer is a placeholder — UI affordance only for now.
-        HStack(spacing: 4) {
-            Image(systemName: "moon.zzz")
-                .font(.system(size: 11, weight: .semibold))
-            Text("Sleep · off")
-                .font(.system(size: 12, weight: .medium))
+    private var sleepMenu: some View {
+        Menu {
+            Button {
+                audio.cancelSleepTimer()
+            } label: {
+                HStack {
+                    Text("Off")
+                    if audio.sleepTarget == nil {
+                        Image(systemName: "checkmark")
+                    }
+                }
+            }
+            ForEach(sleepMinutes, id: \.self) { minutes in
+                Button("\(minutes) min") {
+                    audio.setSleepTimer(minutes: minutes)
+                }
+            }
+            // Only when aligned AND the chapter end is still ahead — arming
+            // a target the playhead already passed would fire within a tick.
+            if let end = chapterEndTime?(), end > engine.currentTime + 1 {
+                Button("End of chapter") {
+                    audio.setSleepTimer(untilAudioTime: end)
+                }
+            }
+        } label: {
+            HStack(spacing: 4) {
+                Image(systemName: "moon.zzz")
+                    .font(.system(size: 11, weight: .semibold))
+                Text(sleepLabel)
+                    .font(.system(size: 12, weight: .medium))
+                    .monospacedDigit()
+            }
+            .foregroundStyle(audio.sleepTarget == nil ? Theme.inkSoft : Theme.accent)
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 10)
+            .background(Theme.canvasDeep.opacity(0.5))
+            .clipShape(Capsule())
         }
-        .foregroundStyle(Theme.inkSoft)
-        .frame(maxWidth: .infinity)
-        .padding(.vertical, 10)
-        .background(Theme.canvasDeep.opacity(0.5))
-        .clipShape(Capsule())
+        .menuStyle(.borderlessButton)
+    }
+
+    private var sleepLabel: String {
+        guard let left = audio.sleepRemainingSeconds else { return "Sleep · off" }
+        let total = max(0, Int(left))
+        // Ceil to whole minutes so a fresh "15 min" pick reads 15m, not 14m.
+        return total >= 60 ? "Sleep · \((total + 59) / 60)m" : "Sleep · \(total)s"
     }
 
     private func formatRate(_ rate: Float) -> String {

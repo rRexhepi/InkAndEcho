@@ -1349,6 +1349,19 @@ struct ReaderView: View {
         followNarration()
     }
 
+    /// Narration end of the chapter being read (audio seconds) — the sleep
+    /// timer's "End of chapter" target. Computed here because the alignment
+    /// map is reader state. Prefers the narrated chapter (the active word
+    /// knows it) over the displayed one, and takes the max anchor end rather
+    /// than trusting sort order (`anchorsBySegment` sorts by START time).
+    /// nil without alignment — there's no data source for unaligned books.
+    func currentChapterEndSeconds() -> TimeInterval? {
+        guard audioIsThisBook else { return nil }
+        guard let segID = activeWordTracker.current?.segmentId ?? currentSegment?.id,
+              let anchors = anchorsBySegment[segID], !anchors.isEmpty else { return nil }
+        return anchors.map(\.endSeconds).max()
+    }
+
     /// Largest dense-word index whose start time is at or before `t`, 0 if `t`
     /// precedes everything. `denseWords` is time-sorted across all chapters, so
     /// this yields the currently-narrated word AND its chapter directly, with no

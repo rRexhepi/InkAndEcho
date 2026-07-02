@@ -68,6 +68,11 @@ public final class AudioEngine {
     /// the EOF-adjacent slice of that race.
     private var scheduleGeneration = 0
 
+    /// In-flight fade-to-pause ramp (sleep timer). Cancelled by play, pause,
+    /// stop, and load; the canceller owns restoring the mixer volume so a
+    /// user action mid-fade never leaves playback half-muted.
+    private var fadeTask: Task<Void, Never>?
+
     /// Invalidated in `deinit` (legal: deinit has exclusive access to stored
     /// properties, and SwiftUI deallocates the engine on the main thread).
     /// Without that hook, popping the reader mid-playback strands a
@@ -254,6 +259,9 @@ public final class AudioEngine {
         let wasPlaying = (state == .playing)
         let resumeAt = currentTime
         stopDisplayTimer()
+        // A live fade ramp would keep writing to the FRESH mixer below (the
+        // task reads `self.engine` per step); the rebuild starts it at 1.
+        cancelFade()
         rebuildAudioGraph()
 
         // The shared session went down with the media server: re-arm the
@@ -409,6 +417,9 @@ public final class AudioEngine {
     }
 
     public func load(url: URL) async throws {
+        // A fade belonging to the previous book must not mute the new one.
+        cancelFade()
+        engine.mainMixerNode.outputVolume = 1
         state = .loading
         do {
             let file = try AVAudioFile(forReading: url)
@@ -432,6 +443,10 @@ public final class AudioEngine {
     public func play() throws {
         guard audioFile != nil else { throw AudioEngineError.notLoaded }
         Self.activateSessionIfNeeded()
+        // Resuming mid-fade (or right after one): kill the ramp and play at
+        // full volume.
+        cancelFade()
+        engine.mainMixerNode.outputVolume = 1
         // After EOF (natural end, or a seek that landed at the end) the
         // player node has an empty queue but still reports `isPlaying`, so
         // the plain `player.play()` below would resume into silence with the
@@ -452,18 +467,57 @@ public final class AudioEngine {
     }
 
     public func pause() {
+        cancelFade()
         guard state == .playing else { return }
         snapshotPosition()
         player.pause()
+        // Restore AFTER the player is paused, so a fade's final quiet level
+        // never pops back to full volume audibly.
+        engine.mainMixerNode.outputVolume = 1
         state = .paused
         stopDisplayTimer()
         updateNowPlayingPlayback()
+    }
+
+    /// Sleep-timer pause: ramp the mixer volume to zero over `seconds`, then
+    /// pause (which restores the volume for the next play). Lives here
+    /// because `engine.mainMixerNode` is engine-private — the App layer has
+    /// no volume access. Play or a plain pause mid-ramp cancels it and snaps
+    /// the volume back.
+    public func pause(fadeOver seconds: TimeInterval) {
+        guard state == .playing, seconds > 0 else {
+            pause()
+            return
+        }
+        fadeTask?.cancel()
+        fadeTask = Task { [weak self] in
+            let steps = 20
+            for step in 1...steps {
+                try? await Task.sleep(for: .seconds(seconds / Double(steps)))
+                guard let self, !Task.isCancelled else { return }
+                self.engine.mainMixerNode.outputVolume = Float(1.0 - Double(step) / Double(steps))
+            }
+            guard let self, !Task.isCancelled else { return }
+            // Nil first so `pause()`'s cancelFade doesn't cancel a task
+            // that already ran to completion.
+            self.fadeTask = nil
+            self.pause()
+        }
+    }
+
+    /// Stop any in-flight fade WITHOUT touching the volume — callers decide
+    /// when to snap back (pause restores only after the player stops).
+    private func cancelFade() {
+        fadeTask?.cancel()
+        fadeTask = nil
     }
 
     /// Fully unload: stop the player, drop the file, reset to idle, and clear
     /// the lock-screen tile. Used when the shared engine's book is deleted or
     /// its audiobook replaced — a clean slate before the next `load`.
     public func stop() {
+        cancelFade()
+        engine.mainMixerNode.outputVolume = 1
         player.stop()
         scheduleGeneration += 1   // invalidate the handler the flush above fires
         stopDisplayTimer()

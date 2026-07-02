@@ -264,11 +264,14 @@ class _SleepPill extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    // Presets match the iOS audio bar. Reverse parity gap vs iOS: no
+    // "End of chapter" target (needs alignment anchors) and the pause cuts
+    // instead of fading out (just_audio exposes setVolume; ramp not built).
     const options = <(String, Duration?)>[
       ('Off', null),
-      ('5 min', Duration(minutes: 5)),
       ('15 min', Duration(minutes: 15)),
       ('30 min', Duration(minutes: 30)),
+      ('45 min', Duration(minutes: 45)),
       ('60 min', Duration(minutes: 60)),
     ];
     final left = player.sleepRemaining;

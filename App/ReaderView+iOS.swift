@@ -317,7 +317,8 @@ extension ReaderView {
                 compact: false,
                 onAlign: alignmentRunning ? nil : { runAlignment() },
                 alignmentExists: alignmentMap != nil,
-                onRequestExpand: nil
+                onRequestExpand: nil,
+                chapterEndTime: { currentChapterEndSeconds() }
             )
         } else {
             attachAudiobookBar
@@ -617,7 +618,8 @@ extension ReaderView {
                 compact: false,
                 onAlign: alignmentRunning ? nil : { runAlignment() },
                 alignmentExists: alignmentMap != nil,
-                onRequestExpand: nil
+                onRequestExpand: nil,
+                chapterEndTime: { currentChapterEndSeconds() }
             )
             .background(Color.clear)
             Spacer(minLength: 0)
