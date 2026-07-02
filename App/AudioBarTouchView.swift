@@ -25,6 +25,13 @@ struct AudioBarTouchView: View {
     private let rates: [Float] = [0.75, 1.0, 1.25, 1.5, 2.0]
     private let sleepMinutes = [15, 30, 45, 60]
 
+    /// Value-change triggers for `.sensoryFeedback`. Local counters (not
+    /// `engine.rate`/`currentTime`) so only the bar the user actually tapped
+    /// buzzes — the expanded sheet overlays the compact bar, and both watch
+    /// the same engine.
+    @State private var skipTapCount = 0
+    @State private var rateTapCount = 0
+
     var body: some View {
         VStack(spacing: 0) {
             if compact, onRequestExpand != nil {
@@ -49,11 +56,22 @@ struct AudioBarTouchView: View {
         }
         .background(Theme.canvasCool)
         .overlay(Rectangle().fill(Theme.hairline).frame(height: 1), alignment: .top)
+        .sensoryFeedback(.impact(weight: .light), trigger: skipTapCount)
+        .sensoryFeedback(.selection, trigger: rateTapCount)
     }
 
     private var transportRow: some View {
         HStack(spacing: 14) {
             playPause(size: compact ? 44 : 52)
+            if compact {
+                // Inline skips: the compact bar had no way to jump ±15 s
+                // without expanding the sheet. Tight spacing (buttons keep
+                // their 44 pt targets) leaves ~180 pt of scrubber at 375 pt.
+                HStack(spacing: 2) {
+                    skipButton(seconds: -15, symbol: "gobackward.15")
+                    skipButton(seconds: 15, symbol: "goforward.15")
+                }
+            }
             VStack(alignment: .leading, spacing: 6) {
                 if !compact {
                     HStack(spacing: 8) {
@@ -117,6 +135,7 @@ struct AudioBarTouchView: View {
         Button {
             let target = max(0, min(engine.duration, engine.currentTime + seconds))
             engine.seek(to: target)
+            skipTapCount += 1
         } label: {
             Image(systemName: symbol)
                 .font(.system(size: 22, weight: .regular))
@@ -134,6 +153,7 @@ struct AudioBarTouchView: View {
                 Button {
                     engine.setRate(rate)
                     UserDefaults.standard.set(Double(rate), forKey: AppSettings.playbackRateKey)
+                    rateTapCount += 1
                 } label: {
                     HStack {
                         Text(formatRate(rate))
