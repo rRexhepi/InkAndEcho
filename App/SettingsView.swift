@@ -148,6 +148,17 @@ struct SettingsView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
+
+            Section("Support") {
+                Link(destination: URL(string: "https://github.com/rRexhepi/ink-and-echo-app/issues")!) {
+                    Label("Report a problem", systemImage: "ladybug")
+                }
+                .tint(Theme.accent)
+                Link(destination: URL(string: "mailto:rexhep.rexhepi.5@gmail.com?subject=Ink%20and%20Echo%20feedback")!) {
+                    Label("Email the developer", systemImage: "envelope")
+                }
+                .tint(Theme.accent)
+            }
         }
         .formStyle(.grouped)
         #if os(macOS)
