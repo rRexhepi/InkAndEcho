@@ -12,6 +12,7 @@ import '../import/ebook_importer.dart';
 import '../import/mobi_importer.dart';
 import '../import/pdf_importer.dart';
 import '../persistence/library_storage.dart';
+import '../whisper/ffmpeg_runner.dart';
 
 /// In-flight alignment for a single book. [stream] is a broadcast, so
 /// late subscribers should read [lastStage] for the current snapshot
@@ -240,16 +241,102 @@ class LibraryStore extends ChangeNotifier {
     return updated;
   }
 
+  /// Multi-part attach (desktop): parts are ordered, stitched with ffmpeg's
+  /// concat demuxer (lossless stream copy) into `audiobook.incoming.<ext>`,
+  /// and only a successful stitch retires the old audio — same
+  /// temp-then-retire dance as the Swift app, so a failed stitch leaves the
+  /// current audiobook and its alignment untouched. Part offsets land beside
+  /// the audio in `chapters.json` (parity with Swift's AudiobookChapters).
+  Future<StoredBook> attachAudioParts(StoredBook book, List<File> parts) async {
+    if (parts.length == 1) return attachAudio(book, parts.single);
+    final ordered = await orderedAudioParts(parts);
+
+    String extOf(File f) => f.path.split('.').last.toLowerCase();
+    final ext = extOf(ordered.first);
+    if (!ordered.every((f) => extOf(f) == ext)) {
+      throw const FormatException(
+          'All parts must share one format — the stitch is a lossless stream copy.');
+    }
+
+    final dir = await storage.bookDir(book.id);
+    final incoming = File('${dir.path}/audiobook.incoming.$ext');
+    if (incoming.existsSync()) incoming.deleteSync();
+
+    final chapters = <Map<String, Object>>[];
+    var cursor = 0.0;
+    for (final part in ordered) {
+      final stem = _fileStem(part.path);
+      final title =
+          await FfmpegRunner.instance.probeFormatTag(part.path, 'title');
+      chapters.add({
+        'title': (title == null || title.isEmpty) ? stem : title,
+        'startSeconds': cursor,
+      });
+      cursor += await FfmpegRunner.instance.probeDurationSeconds(part.path);
+    }
+
+    final result = await FfmpegRunner.instance.concatAudio(
+      inputPaths: [for (final f in ordered) f.path],
+      outputPath: incoming.path,
+    );
+    if (!result.ok) {
+      try {
+        incoming.deleteSync();
+      } catch (_) {}
+      throw FormatException('Stitch failed: ${result.output}');
+    }
+
+    _clearStaleAudioArtifacts(dir, except: incoming.uri.pathSegments.last);
+    final dest = File('${dir.path}/audiobook.$ext');
+    incoming.renameSync(dest.path);
+    await File('${dir.path}/chapters.json')
+        .writeAsString(jsonEncode({'chapters': chapters}));
+
+    final updated = _withReplacedAudio(book, audioPath: dest.path);
+    await _replace(updated);
+    return updated;
+  }
+
+  /// The parts in playback order: by track-number tag when every part
+  /// carries a distinct one, otherwise natural filename sort
+  /// (zero-padding-proof). Mirrors `ImportService.resolvedPartOrder`.
+  Future<List<File>> orderedAudioParts(List<File> parts) async {
+    if (parts.length <= 1) return parts;
+    final tracks = <String, int>{};
+    for (final part in parts) {
+      final raw =
+          await FfmpegRunner.instance.probeFormatTag(part.path, 'track');
+      if (raw == null) continue;
+      // Track tags are routinely "3/12".
+      final match = RegExp(r'^\d+').firstMatch(raw.trim());
+      if (match != null) tracks[part.path] = int.parse(match.group(0)!);
+    }
+    final sorted = [...parts];
+    if (tracks.length == parts.length &&
+        tracks.values.toSet().length == parts.length) {
+      sorted.sort((a, b) => tracks[a.path]!.compareTo(tracks[b.path]!));
+    } else {
+      sorted.sort((a, b) => _naturalCompare(
+          a.uri.pathSegments.last, b.uri.pathSegments.last));
+    }
+    return sorted;
+  }
+
   /// Drops every prior `audiobook.*` file (the new pick may have a different
-  /// extension) and the alignment JSON it was computed against. Without this,
-  /// swapping in a different audiobook would leave a stale alignment.json
-  /// that the next reader open would happily reload — wrong word timestamps,
-  /// paragraphs jumping to the wrong audio position.
-  void _clearStaleAudioArtifacts(Directory dir) {
+  /// extension), the alignment JSON it was computed against, and any
+  /// chapters.json from a previous multi-part attach. Without this, swapping
+  /// in a different audiobook would leave a stale alignment.json that the
+  /// next reader open would happily reload — wrong word timestamps,
+  /// paragraphs jumping to the wrong audio position. [except] shields the
+  /// just-stitched incoming temp.
+  void _clearStaleAudioArtifacts(Directory dir, {String? except}) {
     for (final entity in dir.listSync()) {
       if (entity is! File) continue;
       final name = entity.uri.pathSegments.last;
-      if (name.startsWith('audiobook.') || name == 'alignment.json') {
+      if (name == except) continue;
+      if (name.startsWith('audiobook.') ||
+          name == 'alignment.json' ||
+          name == 'chapters.json') {
         try {
           entity.deleteSync();
         } catch (_) {}
@@ -493,4 +580,27 @@ class LibraryStore extends ChangeNotifier {
     _books.removeWhere((b) => b.id == book.id);
     notifyListeners();
   }
+}
+
+String _fileStem(String path) {
+  final name = Uri.file(path).pathSegments.last;
+  final dot = name.lastIndexOf('.');
+  return dot <= 0 ? name : name.substring(0, dot);
+}
+
+/// Finder-style compare: digit runs compare numerically, so
+/// "part 2" < "part 10" without zero-padding.
+int _naturalCompare(String a, String b) {
+  final re = RegExp(r'\d+|\D+');
+  final aRuns = re.allMatches(a.toLowerCase()).map((m) => m.group(0)!).toList();
+  final bRuns = re.allMatches(b.toLowerCase()).map((m) => m.group(0)!).toList();
+  for (var i = 0; i < aRuns.length && i < bRuns.length; i++) {
+    final aNum = int.tryParse(aRuns[i]);
+    final bNum = int.tryParse(bRuns[i]);
+    final c = (aNum != null && bNum != null)
+        ? aNum.compareTo(bNum)
+        : aRuns[i].compareTo(bRuns[i]);
+    if (c != 0) return c;
+  }
+  return aRuns.length.compareTo(bRuns.length);
 }

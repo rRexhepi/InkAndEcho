@@ -63,11 +63,7 @@ struct ImportService {
     /// Attaches an audiobook file to an existing book. Copies the file into the
     /// book's storage directory and reads its duration for display.
     func attachAudiobook(_ url: URL, to book: Book) async throws {
-        guard let ebookURL = book.resolvedEbookURL else {
-            throw ImportServiceError.missingEbook
-        }
-        let bookDir = ebookURL.deletingLastPathComponent()
-        let stored = bookDir.appendingPathComponent("audiobook.\(url.pathExtension)")
+        let bookDir = try bookDir(for: book)
 
         // See `importBook` — picker URLs are security-scoped on iOS and
         // the copy below fails silently without start/stop access.
@@ -84,6 +80,158 @@ struct ImportService {
         try? FileManager.default.removeItem(at: tempURL)
         try await Self.copyOffMain(from: url, to: tempURL)
 
+        try await finalizeAttach(tempURL: tempURL, ext: url.pathExtension, bookDir: bookDir, book: book, chapters: nil)
+    }
+
+    /// Multi-part attach: parts are ordered (track tags, natural-sort
+    /// fallback), stitched into one AAC m4a, and handed to the exact same
+    /// temp-then-retire dance as the single-file path — crash safety and
+    /// stale-alignment purge are reused verbatim. Part offsets land in
+    /// `chapters.json` beside the audio. Cancel via the surrounding Task;
+    /// nothing on disk changes on cancellation or failure.
+    func attachAudiobook(_ urls: [URL], to book: Book, progress: @escaping @Sendable (Double) -> Void) async throws {
+        guard urls.count > 1 else {
+            guard let url = urls.first else { return }
+            return try await attachAudiobook(url, to: book)
+        }
+        let bookDir = try bookDir(for: book)
+
+        // Scope spans the whole merge: the export streams from every source
+        // until it finishes.
+        let scoped = urls.map { ($0, $0.startAccessingSecurityScopedResource()) }
+        defer {
+            for (url, needsScope) in scoped where needsScope {
+                url.stopAccessingSecurityScopedResource()
+            }
+        }
+
+        let ordered = await Self.resolvedPartOrder(urls)
+        let tempURL = bookDir.appendingPathComponent("audiobook.incoming.m4a")
+        try? FileManager.default.removeItem(at: tempURL)
+        let chapters = try await Self.mergeParts(ordered, into: tempURL, progress: progress)
+
+        try await finalizeAttach(tempURL: tempURL, ext: "m4a", bookDir: bookDir, book: book, chapters: chapters)
+    }
+
+    /// The parts in playback order: by track-number tag (ID3 `TRCK` /
+    /// iTunes `trkn`) when every part carries a distinct one, otherwise
+    /// Finder-style natural filename sort (zero-padding-proof).
+    nonisolated static func resolvedPartOrder(_ urls: [URL]) async -> [URL] {
+        guard urls.count > 1 else { return urls }
+        var tracks: [URL: Int] = [:]
+        for url in urls {
+            let needsScope = url.startAccessingSecurityScopedResource()
+            defer { if needsScope { url.stopAccessingSecurityScopedResource() } }
+            guard let metadata = try? await AVURLAsset(url: url).load(.metadata) else { continue }
+            let items = AVMetadataItem.metadataItems(from: metadata, filteredByIdentifier: .id3MetadataTrackNumber)
+                + AVMetadataItem.metadataItems(from: metadata, filteredByIdentifier: .iTunesMetadataTrackNumber)
+            for item in items {
+                if let number = (try? await item.load(.numberValue)) ?? nil {
+                    tracks[url] = number.intValue
+                    break
+                }
+                // ID3 track tags are strings, routinely "3/12".
+                if let string = (try? await item.load(.stringValue)) ?? nil,
+                   let number = Int(string.prefix(while: \.isNumber)) {
+                    tracks[url] = number
+                    break
+                }
+            }
+        }
+        if tracks.count == urls.count, Set(tracks.values).count == urls.count {
+            return urls.sorted { tracks[$0]! < tracks[$1]! }
+        }
+        return urls.sorted {
+            $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending
+        }
+    }
+
+    /// One AAC m4a from the ordered parts via `AVMutableComposition` —
+    /// re-encoding through the AppleM4A preset also irons out mixed source
+    /// codecs and sample rates. Composition inserts are metadata work; the
+    /// export is the long pole, so progress polls it and Task cancellation
+    /// cancels it mid-flight. Nonisolated: sample-table reads during insert
+    /// must not stall the main actor.
+    private nonisolated static func mergeParts(
+        _ urls: [URL],
+        into outputURL: URL,
+        progress: @escaping @Sendable (Double) -> Void
+    ) async throws -> AudiobookChapters {
+        let composition = AVMutableComposition()
+        guard let track = composition.addMutableTrack(withMediaType: .audio, preferredTrackID: kCMPersistentTrackID_Invalid) else {
+            throw ImportServiceError.unplayableAudio("Couldn't create a composition track.")
+        }
+        var chapters: [AudiobookChapters.Chapter] = []
+        var cursor = CMTime.zero
+        for (index, url) in urls.enumerated() {
+            try Task.checkCancellation()
+            let asset = AVURLAsset(url: url)
+            guard let sourceTrack = try? await asset.loadTracks(withMediaType: .audio).first,
+                  let duration = try? await asset.load(.duration) else {
+                throw ImportServiceError.unplayableAudio("\(url.lastPathComponent) has no readable audio track.")
+            }
+            do {
+                try track.insertTimeRange(CMTimeRange(start: .zero, duration: duration), of: sourceTrack, at: cursor)
+            } catch {
+                throw ImportServiceError.unplayableAudio("\(url.lastPathComponent): \(error.localizedDescription)")
+            }
+            chapters.append(.init(title: await partTitle(for: asset, fallback: url), startSeconds: cursor.seconds))
+            cursor = cursor + duration
+            progress(0.05 * Double(index + 1) / Double(urls.count))
+        }
+
+        guard let session = AVAssetExportSession(asset: composition, presetName: AVAssetExportPresetAppleM4A) else {
+            throw ImportServiceError.unplayableAudio("Audio export isn't available for these files.")
+        }
+        session.outputURL = outputURL
+        session.outputFileType = .m4a
+
+        let box = ExportBox(session)
+        let poll = Task.detached {
+            while !Task.isCancelled {
+                progress(0.05 + 0.95 * Double(box.session.progress))
+                try? await Task.sleep(for: .milliseconds(250))
+            }
+        }
+        defer { poll.cancel() }
+
+        await withTaskCancellationHandler {
+            await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+                box.session.exportAsynchronously { continuation.resume() }
+            }
+        } onCancel: {
+            box.session.cancelExport()
+        }
+
+        guard session.status == .completed else {
+            try? FileManager.default.removeItem(at: outputURL)
+            try Task.checkCancellation()
+            throw ImportServiceError.unplayableAudio(session.error?.localizedDescription ?? "Audio export failed.")
+        }
+        return AudiobookChapters(chapters: chapters)
+    }
+
+    private nonisolated static func partTitle(for asset: AVAsset, fallback url: URL) async -> String {
+        if let metadata = try? await asset.load(.commonMetadata),
+           let item = AVMetadataItem.metadataItems(from: metadata, filteredByIdentifier: .commonIdentifierTitle).first,
+           let title = (try? await item.load(.stringValue)) ?? nil,
+           !title.isEmpty {
+            return title
+        }
+        return url.deletingPathExtension().lastPathComponent
+    }
+
+    /// `AVAssetExportSession` isn't Sendable, but `progress`,
+    /// `cancelExport()`, and `exportAsynchronously` are thread-safe; this box
+    /// carries exactly those uses across the poll/cancellation boundaries.
+    private final class ExportBox: @unchecked Sendable {
+        let session: AVAssetExportSession
+        init(_ session: AVAssetExportSession) { self.session = session }
+    }
+
+    /// Shared tail of every attach: probe, retire the old artifacts, move
+    /// the new audio into place, persist.
+    private func finalizeAttach(tempURL: URL, ext: String, bookDir: URL, book: Book, chapters: AudiobookChapters?) async throws {
         // Probe BEFORE retiring anything: a file the engine can't open
         // (DRM-protected m4b, corrupt download) must fail the attach while
         // the user's working audiobook and its alignment are still on disk —
@@ -95,20 +243,24 @@ struct ImportService {
             throw ImportServiceError.unplayableAudio(error.localizedDescription)
         }
 
-        // New audio is safe — now retire the old audio and its alignment
-        // (computed against the old audio's timestamps). The new pick may
-        // have a different extension, so a same-name remove isn't enough.
+        // New audio is safe — now retire the old audio, its alignment
+        // (computed against the old audio's timestamps), and any part
+        // offsets from a previous multi-file attach. The new pick may have
+        // a different extension, so a same-name remove isn't enough.
         if let contents = try? FileManager.default.contentsOfDirectory(at: bookDir, includingPropertiesForKeys: nil) {
             for entry in contents
             where entry.lastPathComponent.hasPrefix("audiobook.") && entry != tempURL {
                 try? FileManager.default.removeItem(at: entry)
             }
         }
-        let alignmentPath = bookDir.appendingPathComponent("alignment.json")
-        try? FileManager.default.removeItem(at: alignmentPath)
+        try? FileManager.default.removeItem(at: bookDir.appendingPathComponent("alignment.json"))
+        try? FileManager.default.removeItem(at: bookDir.appendingPathComponent("chapters.json"))
         book.alignmentMapURL = nil
 
+        let stored = bookDir.appendingPathComponent("audiobook.\(ext)")
         try FileManager.default.moveItem(at: tempURL, to: stored)
+        // Sidecar for future scrubber ticks — losing it doesn't fail the attach.
+        try? chapters?.write(to: bookDir.appendingPathComponent("chapters.json"))
 
         let asset = AVURLAsset(url: stored)
         let duration = (try? await asset.load(.duration)) ?? .zero
@@ -116,6 +268,13 @@ struct ImportService {
         book.audiobookFileURL = stored
         book.totalDurationSeconds = CMTimeGetSeconds(duration)
         try modelContext.save()
+    }
+
+    private func bookDir(for book: Book) throws -> URL {
+        guard let ebookURL = book.resolvedEbookURL else {
+            throw ImportServiceError.missingEbook
+        }
+        return ebookURL.deletingLastPathComponent()
     }
 
     /// Removes a book and its on-disk files. Record first, files second: if

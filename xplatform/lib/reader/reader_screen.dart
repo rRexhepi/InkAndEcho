@@ -16,6 +16,7 @@ import '../persistence/library_storage.dart';
 import '../platform/form_factor.dart';
 import '../state/library_store.dart';
 import '../theme.dart';
+import '../widgets/app_dialog.dart';
 import 'audio_sheet.dart';
 import 'curl_page_view.dart';
 import 'paginator.dart';
@@ -300,10 +301,12 @@ class _ReaderScreenState extends State<ReaderScreen> {
   Future<void> _attachAudio() async {
     // Android: SAF greys out `.m4b` under `FileType.custom` (no registered
     // MIME), so we go `FileType.audio` to get the `audio/*` view that
-    // surfaces every audiobook format.
+    // surfaces every audiobook format. Single-file only until the
+    // MediaCodec re-mux lands (no ffmpeg on Android to stitch parts).
     // Desktop (Linux/Windows): file_picker drives zenity/kdialog and its
     // `audio/*` MIME filter also drops `.m4b` on most installs, so we go
-    // back to explicit extensions there.
+    // back to explicit extensions there. Multi-select covers mp3-folder
+    // audiobooks — parts get stitched into one file.
     final result = Platform.isAndroid
         ? await FilePicker.platform.pickFiles(type: FileType.audio)
         : await FilePicker.platform.pickFiles(
@@ -312,10 +315,43 @@ class _ReaderScreenState extends State<ReaderScreen> {
               'm4b', 'm4a', 'mp3', 'wav', 'aac',
               'flac', 'ogg', 'opus', 'mp4',
             ],
+            allowMultiple: true,
           );
-    if (result == null || result.files.single.path == null) return;
-    final updated =
-        await widget.store.attachAudio(_book, File(result.files.single.path!));
+    if (result == null) return;
+    final files = [
+      for (final f in result.files)
+        if (f.path != null) File(f.path!),
+    ];
+    if (files.isEmpty) return;
+
+    final StoredBook updated;
+    if (files.length > 1) {
+      final ordered = await widget.store.orderedAudioParts(files);
+      if (!mounted) return;
+      final listing = [
+        for (var i = 0; i < ordered.length; i++)
+          '${i + 1}. ${ordered[i].uri.pathSegments.last}',
+      ].join('\n');
+      final confirmed = await showAppConfirmDialog(
+        context: context,
+        title: 'Stitch ${ordered.length} files into one audiobook?',
+        message: listing,
+        confirmLabel: 'Stitch in this order',
+      );
+      if (!confirmed || !mounted) return;
+      try {
+        updated = await widget.store.attachAudioParts(_book, ordered);
+      } catch (e) {
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Stitch failed: $e')),
+        );
+        return;
+      }
+    } else {
+      updated = await widget.store.attachAudio(_book, files.single);
+    }
+    if (!mounted) return;
     setState(() {
       _book = updated;
       // Drop the in-memory alignment too — `attachAudio` already deleted

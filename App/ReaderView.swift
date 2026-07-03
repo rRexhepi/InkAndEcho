@@ -25,6 +25,12 @@ struct ReaderView: View {
     var audioIsThisBook: Bool { audio.isLoaded(book) }
     @State var showAudioImporter = false
     @State var attachError: String?
+    /// Multi-file pick: resolved playback order awaiting the user's confirm.
+    @State var pendingAudioParts: [URL]?
+    /// Non-nil while a multi-part merge runs; drives the attach bar's
+    /// progress + Cancel rendering.
+    @State var attachProgress: Double?
+    @State var attachTask: Task<Void, Never>?
     /// One-shot alert when a SwiftData save fails. Annotation and progress
     /// writes used `try?` — a persistent failure (disk full beside multi-GB
     /// audiobooks) silently discarded highlights/notes/positions while the
@@ -220,7 +226,8 @@ struct ReaderView: View {
         }
         .fileImporter(
             isPresented: $showAudioImporter,
-            allowedContentTypes: audioContentTypes
+            allowedContentTypes: audioContentTypes,
+            allowsMultipleSelection: true
         ) { result in
             handleAudioPicked(result)
         }
@@ -231,6 +238,24 @@ struct ReaderView: View {
             Button("OK", role: .cancel) { attachError = nil }
         } message: {
             Text(attachError ?? "")
+        }
+        .alert(
+            "Stitch \(pendingAudioParts?.count ?? 0) files into one audiobook?",
+            isPresented: Binding(
+                get: { pendingAudioParts != nil },
+                set: { if !$0 { pendingAudioParts = nil } }
+            ),
+            presenting: pendingAudioParts
+        ) { parts in
+            Button("Stitch in this order") {
+                pendingAudioParts = nil
+                attachAudio(parts)
+            }
+            Button("Cancel", role: .cancel) { pendingAudioParts = nil }
+        } message: { parts in
+            Text(parts.enumerated()
+                .map { "\($0.offset + 1). \($0.element.lastPathComponent)" }
+                .joined(separator: "\n"))
         }
         .alert("Alignment failed", isPresented: Binding(
             get: { alignmentError != nil },
@@ -1550,23 +1575,40 @@ struct ReaderView: View {
 
     var attachAudiobookBar: some View {
         HStack(spacing: 12) {
-            Image(systemName: "speaker.wave.2")
-                .foregroundStyle(Theme.inkMuted)
-            Text("No audiobook attached")
-                .font(.callout)
-                .foregroundStyle(Theme.inkMuted)
-            Spacer()
-            Button {
-                showAudioImporter = true
-            } label: {
-                Label("Attach…", systemImage: "plus")
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 6)
+            if let attachProgress {
+                Image(systemName: "waveform")
+                    .foregroundStyle(Theme.inkMuted)
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Stitching audio files…")
+                        .font(.callout)
+                        .foregroundStyle(Theme.inkMuted)
+                    ProgressView(value: attachProgress)
+                        .tint(Theme.accent)
+                }
+                Button("Cancel") {
+                    attachTask?.cancel()
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(Theme.accent)
+            } else {
+                Image(systemName: "speaker.wave.2")
+                    .foregroundStyle(Theme.inkMuted)
+                Text("No audiobook attached")
+                    .font(.callout)
+                    .foregroundStyle(Theme.inkMuted)
+                Spacer()
+                Button {
+                    showAudioImporter = true
+                } label: {
+                    Label("Attach…", systemImage: "plus")
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 6)
+                }
+                .buttonStyle(.plain)
+                .background(Theme.accent)
+                .foregroundStyle(Theme.onAccent)
+                .clipShape(RoundedRectangle(cornerRadius: 6))
             }
-            .buttonStyle(.plain)
-            .background(Theme.accent)
-            .foregroundStyle(Theme.onAccent)
-            .clipShape(RoundedRectangle(cornerRadius: 6))
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 10)
@@ -2041,33 +2083,53 @@ struct ReaderView: View {
         return types
     }
 
-    func handleAudioPicked(_ result: Result<URL, Error>) {
+    func handleAudioPicked(_ result: Result<[URL], Error>) {
         switch result {
-        case .success(let url):
+        case .success(let urls) where urls.count > 1:
+            // Resolve the stitch order up front (track tags, natural-sort
+            // fallback) so the confirm alert shows exactly what will play.
             Task { @MainActor in
-                do {
-                    let service = ImportService(modelContext: modelContext)
-                    try await service.attachAudiobook(url, to: book)
-                    // Drop the in-memory alignment too — `attachAudiobook`
-                    // already deleted the on-disk JSON and nulled the
-                    // book.alignmentMapURL, but the reader holds a
-                    // separate cached copy that the page-curl reads for
-                    // play-from-here. Without this the UI keeps "Re-align"
-                    // available against stale anchors until the next book
-                    // open.
-                    alignmentMap = nil
-                    rebuildAnchorIndex()
-                    // The audiobook file changed on disk; force the shared
-                    // engine to drop and reload it (a plain present() would
-                    // no-op since the bookID is unchanged).
-                    audio.unload(ifBookID: book.id)
-                    await audio.switchTo(book: book)
-                } catch {
-                    attachError = error.localizedDescription
-                }
+                pendingAudioParts = await ImportService.resolvedPartOrder(urls)
             }
+        case .success(let urls):
+            attachAudio(urls)
         case .failure(let error):
             attachError = error.localizedDescription
+        }
+    }
+
+    func attachAudio(_ urls: [URL]) {
+        guard !urls.isEmpty else { return }
+        attachTask = Task { @MainActor in
+            defer {
+                attachProgress = nil
+                attachTask = nil
+            }
+            do {
+                if urls.count > 1 { attachProgress = 0 }
+                let service = ImportService(modelContext: modelContext)
+                try await service.attachAudiobook(urls, to: book) { fraction in
+                    Task { @MainActor in attachProgress = fraction }
+                }
+                // Drop the in-memory alignment too — `attachAudiobook`
+                // already deleted the on-disk JSON and nulled the
+                // book.alignmentMapURL, but the reader holds a
+                // separate cached copy that the page-curl reads for
+                // play-from-here. Without this the UI keeps "Re-align"
+                // available against stale anchors until the next book
+                // open.
+                alignmentMap = nil
+                rebuildAnchorIndex()
+                // The audiobook file changed on disk; force the shared
+                // engine to drop and reload it (a plain present() would
+                // no-op since the bookID is unchanged).
+                audio.unload(ifBookID: book.id)
+                await audio.switchTo(book: book)
+            } catch is CancellationError {
+                // User cancelled the merge — nothing changed on disk.
+            } catch {
+                attachError = error.localizedDescription
+            }
         }
     }
 }

@@ -80,6 +80,54 @@ class FfmpegRunner {
     return (seconds != null && seconds.isFinite && seconds > 0) ? seconds : 0;
   }
 
+  /// Lossless concat of same-codec [inputPaths] into [outputPath] via the
+  /// concat demuxer (`-c copy`). Desktop-only; the Android multi-part
+  /// attach is a follow-up increment (MediaCodec re-mux).
+  Future<FfmpegResult> concatAudio({
+    required List<String> inputPaths,
+    required String outputPath,
+  }) async {
+    if (useNativeAndroid) {
+      throw UnsupportedError('concatAudio is desktop-only.');
+    }
+    final listDir = await Directory.systemTemp.createTemp('inkandecho-concat');
+    final listFile = File('${listDir.path}/parts.txt');
+    // concat-demuxer quoting: single-quoted, embedded quotes escaped as '\''.
+    final lines = inputPaths
+        .map((p) => "file '${p.replaceAll("'", "'\\''")}'")
+        .join('\n');
+    await listFile.writeAsString('$lines\n');
+    try {
+      return await _runHostBinary(_ffmpegBin, [
+        '-y',
+        '-f', 'concat',
+        '-safe', '0',
+        '-i', listFile.path,
+        '-c', 'copy',
+        outputPath,
+      ]);
+    } finally {
+      try {
+        await listDir.delete(recursive: true);
+      } catch (_) {}
+    }
+  }
+
+  /// Value of a container-level metadata [tag] (e.g. 'track', 'title'), or
+  /// null when absent or the probe fails. Android has no ffprobe — null.
+  Future<String?> probeFormatTag(String inputPath, String tag) async {
+    if (useNativeAndroid) return null;
+    final r = await _runHostBinary(_ffprobeBin, [
+      '-v', 'quiet',
+      '-show_entries', 'format_tags=$tag',
+      '-of', 'default=noprint_wrappers=1:nokey=1',
+      inputPath,
+    ]);
+    if (!r.ok) return null;
+    final value = r.output.trim();
+    return value.isEmpty ? null : value;
+  }
+
   /// Spawn ffmpeg with its stdout/stderr exposed for streaming consumption.
   /// Desktop-only. Callers must `await Process.exitCode` to reap the child.
   Future<Process> startFfmpeg(List<String> args) {
