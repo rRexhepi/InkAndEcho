@@ -4,9 +4,11 @@ import SwiftUI
 /// First-launch onboarding for iOS. Four screens: welcome (logomark +
 /// tagline), how-it-works (3 numbered steps), local-first privacy, and
 /// you're-set CTA. Persisted via `inkandecho.hasCompletedOnboarding` in
-/// `LibraryView`. Triggers the import picker on completion.
+/// `LibraryView`. `onFinish` triggers the import picker; `onTryDemo`
+/// installs the bundled demo pair (read-along live immediately).
 struct OnboardingView: View {
     let onFinish: () -> Void
+    let onTryDemo: () -> Void
     @State private var page: Int = 0
 
     private let totalPages = 4
@@ -124,6 +126,22 @@ struct OnboardingView: View {
                 .foregroundStyle(Theme.inkSoft)
                 .multilineTextAlignment(.center)
                 .padding(.horizontal, 32)
+            // Primary CTA: the bundled demo pair is already aligned, so
+            // this is the zero-wait path to seeing read-along work.
+            Button(action: onTryDemo) {
+                Text("Try it with a demo book")
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundStyle(Theme.onAccent)
+                    .padding(.horizontal, 22)
+                    .padding(.vertical, 12)
+                    .background(Theme.accent)
+                    .clipShape(Capsule())
+            }
+            .buttonStyle(.plain)
+            .padding(.top, 12)
+            Text("a ten-minute story, narration already synced")
+                .font(.system(size: 11, design: .monospaced))
+                .foregroundStyle(Theme.inkMuted)
             Spacer()
         }
     }

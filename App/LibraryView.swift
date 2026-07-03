@@ -36,6 +36,10 @@ struct LibraryView: View {
     @State private var showSourceGuide = false
     @AppStorage("inkandecho.lastOpenedBookID") private var lastOpenedBookID: String = ""
     @AppStorage("inkandecho.hasCompletedOnboarding") private var hasCompletedOnboarding: Bool = false
+    /// UUID of the installed demo book — "Try it" opens the existing copy
+    /// instead of installing a second one. Cleared implicitly by deletion:
+    /// a stale ID just means the next "Try it" reinstalls.
+    @AppStorage("inkandecho.demoBookID") private var demoBookID: String = ""
 
     var body: some View {
         rootLayout
@@ -83,10 +87,16 @@ struct LibraryView: View {
                 get: { !hasCompletedOnboarding },
                 set: { _ in }
             )) {
-                OnboardingView(onFinish: {
-                    hasCompletedOnboarding = true
-                    showingImporter = true
-                })
+                OnboardingView(
+                    onFinish: {
+                        hasCompletedOnboarding = true
+                        showingImporter = true
+                    },
+                    onTryDemo: {
+                        hasCompletedOnboarding = true
+                        openDemoBook()
+                    }
+                )
             }
             .sheet(isPresented: $showSettings) {
                 NavigationStack {
@@ -274,6 +284,35 @@ struct LibraryView: View {
             do {
                 let service = ImportService(modelContext: modelContext)
                 let book = try await service.importBook(from: url)
+                selectedBook = book
+            } catch {
+                importError = error.localizedDescription
+            }
+        }
+    }
+
+    /// "Try it with a demo book": install the bundled epub + m4b +
+    /// pre-baked alignment trio (word-follow live immediately, zero model
+    /// download) — or just open the copy a previous tap installed.
+    private func openDemoBook() {
+        if let uuid = UUID(uuidString: demoBookID),
+           let existing = books.first(where: { $0.id == uuid }) {
+            selectedBook = existing
+            return
+        }
+        guard let epub = Bundle.main.url(forResource: "demo-book", withExtension: "epub"),
+              let audio = Bundle.main.url(forResource: "demo-book", withExtension: "m4b"),
+              let alignmentMap = Bundle.main.url(forResource: "demo-alignment", withExtension: "json") else {
+            importError = "The demo book isn't bundled in this build."
+            return
+        }
+        Task { @MainActor in
+            importing = true
+            defer { importing = false }
+            do {
+                let service = ImportService(modelContext: modelContext)
+                let book = try await service.installDemoBook(epub: epub, audio: audio, alignment: alignmentMap)
+                demoBookID = book.id.uuidString
                 selectedBook = book
             } catch {
                 importError = error.localizedDescription

@@ -113,6 +113,24 @@ struct ImportService {
         try await finalizeAttach(tempURL: tempURL, ext: "m4a", bookDir: bookDir, book: book, chapters: chapters)
     }
 
+    /// Bundled demo trio (epub + m4b + PRE-BAKED alignment.json): the epub
+    /// imports through the normal path, the audio attaches through the
+    /// normal path, then the baked map drops in and `alignmentMapURL` is
+    /// set directly (it's just a stored URL) — read-along is live seconds
+    /// after "Try it", no model download, no align wait. The map was baked
+    /// headless with the same importer + aligner against these exact
+    /// files, so segment IDs and word indices match what the app derives
+    /// when it re-parses the epub at open.
+    func installDemoBook(epub: URL, audio: URL, alignment: URL) async throws -> Book {
+        let book = try await importBook(from: epub)
+        try await attachAudiobook(audio, to: book)
+        let mapURL = try bookDir(for: book).appendingPathComponent("alignment.json")
+        try FileManager.default.copyItem(at: alignment, to: mapURL)
+        book.alignmentMapURL = mapURL
+        try modelContext.save()
+        return book
+    }
+
     /// The parts in playback order: by track-number tag (ID3 `TRCK` /
     /// iTunes `trkn`) when every part carries a distinct one, otherwise
     /// Finder-style natural filename sort (zero-padding-proof).
