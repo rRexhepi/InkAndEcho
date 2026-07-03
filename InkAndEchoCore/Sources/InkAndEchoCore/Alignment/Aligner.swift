@@ -62,10 +62,19 @@ public struct WhisperAligner: AudioTextAligner {
             return map
         }
 
+        let modelFolder = try await Self.ensureModelOnDisk(variant: modelIdentifier, progress: progress)
+
         progress(.loadingModel(model: modelIdentifier))
         let pipe: WhisperKit
         do {
-            pipe = try await WhisperKit(WhisperKitConfig(model: modelIdentifier))
+            // Explicit `modelFolder` skips WhisperKit's hub lookup entirely,
+            // so once the model is on disk, alignment works offline.
+            pipe = try await WhisperKit(WhisperKitConfig(
+                model: modelIdentifier,
+                modelFolder: modelFolder.path
+            ))
+        } catch is CancellationError {
+            throw CancellationError()
         } catch {
             throw AlignerError.modelNotFound(
                 "Could not load Whisper model '\(modelIdentifier)': \(error.localizedDescription)"
@@ -367,6 +376,54 @@ public struct WhisperAligner: AudioTextAligner {
         return pairs
     }
 
+    // MARK: - Model download
+
+    /// Where WhisperKit's hub client materializes a downloaded model
+    /// (Documents/huggingface/models/<repo>/<variant>). Mirroring the layout
+    /// here lets us detect a local model without any network round-trip —
+    /// `WhisperKit.download` starts with a hub file listing even when every
+    /// file is already on disk, which fails offline.
+    static func localModelFolder(variant: String) -> URL {
+        FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("huggingface/models/argmaxinc/whisperkit-coreml", isDirectory: true)
+            .appendingPathComponent(variant, isDirectory: true)
+    }
+
+    private static func modelIsComplete(at folder: URL) -> Bool {
+        ["MelSpectrogram.mlmodelc", "AudioEncoder.mlmodelc", "TextDecoder.mlmodelc"].allSatisfy {
+            FileManager.default.fileExists(atPath: folder.appendingPathComponent($0).path)
+        }
+    }
+
+    /// Returns the local model folder, downloading it first when absent or
+    /// incomplete (an interrupted download leaves a partial folder; the hub
+    /// snapshot resumes it). The download is the silent ~150 MB first-run
+    /// cost that used to hide behind a static "2%" — surface it as its own
+    /// stage with real progress.
+    private static func ensureModelOnDisk(
+        variant: String,
+        progress: @Sendable @escaping (AlignmentStage) -> Void
+    ) async throws -> URL {
+        let local = localModelFolder(variant: variant)
+        if modelIsComplete(at: local) { return local }
+        progress(.downloadingModel(fraction: 0))
+        do {
+            return try await WhisperKit.download(variant: variant) { p in
+                progress(.downloadingModel(fraction: p.fractionCompleted))
+            }
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch is URLError {
+            throw AlignerError.modelDownloadFailed(
+                "Internet needed once to fetch the alignment model."
+            )
+        } catch {
+            throw AlignerError.modelDownloadFailed(
+                "Internet needed once to fetch the alignment model — \(error.localizedDescription)"
+            )
+        }
+    }
+
     /// Seconds of audio loaded past each chunk boundary so seam-straddling
     /// words transcribe cleanly in the earlier chunk.
     static let seamOverlapSeconds: Double = 2
@@ -526,9 +583,22 @@ public struct WhisperAligner: AudioTextAligner {
 public enum AlignerError: Error, Sendable {
     case modelNotFound(String)
     case transcriptionFailed(String)
+    case modelDownloadFailed(String)
+}
+
+extension AlignerError: LocalizedError {
+    public var errorDescription: String? {
+        switch self {
+        case .modelNotFound(let message),
+             .transcriptionFailed(let message),
+             .modelDownloadFailed(let message):
+            return message
+        }
+    }
 }
 
 public enum AlignmentStage: Sendable {
+    case downloadingModel(fraction: Double)
     case loadingModel(model: String)
     case transcribing(snippet: String?, fraction: Double?, etaSeconds: TimeInterval?)
     case aligning
@@ -536,6 +606,8 @@ public enum AlignmentStage: Sendable {
 
     public var displayText: String {
         switch self {
+        case .downloadingModel:
+            return "Downloading alignment model (one-time)…"
         case .loadingModel(let model):
             return "Loading Whisper model (\(model))…"
         case .transcribing(let snippet, _, let eta):
@@ -552,6 +624,10 @@ public enum AlignmentStage: Sendable {
 
     public var progressFraction: Double? {
         switch self {
+        case .downloadingModel(let fraction):
+            // The download owns the first tenth of the bar; transcription's
+            // audio fraction takes over from there.
+            return min(1, max(0, fraction)) * 0.1
         case .loadingModel: return 0.02
         case .transcribing(_, let fraction, _): return fraction
         case .aligning: return 0.95
