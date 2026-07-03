@@ -47,6 +47,16 @@ struct ReaderView: View {
     var alignmentStage: AlignmentStage { alignment.stage ?? .aligning }
     var alignmentToast: String? { alignmentRunning ? nil : alignment.toast }
     var alignmentError: String? { alignment.error }
+    /// Transcription frontier (audio seconds) of a live partial alignment
+    /// for THIS book; nil once the job completes or when another book's
+    /// job is running. Everything at or past it is "not synced yet".
+    var partialFrontier: Double? {
+        guard alignmentRunning, alignment.partialMap != nil else { return nil }
+        return alignment.partialCoveredThrough
+    }
+    /// Transient reader notice (e.g. tapping a not-yet-synced word during a
+    /// running alignment). Auto-clears; rendered in the banner slot.
+    @State var seekNotice: String?
 
     @State var noteAnchor: ParagraphAnchor?
     @State var noteEditingExisting: Annotation?
@@ -214,6 +224,15 @@ struct ReaderView: View {
             // clobber our state.
             guard finished == book.id else { return }
             reloadAlignmentAfterCompletion()
+        }
+        .onChange(of: alignment.partialRevision) { _, _ in
+            // A partial map landed for the running job. Swap it in (only
+            // when the job is THIS book's) so read-along and tap-to-play go
+            // live in already-transcribed chapters mid-alignment.
+            guard alignment.isRunning(for: book.id),
+                  let partial = alignment.partialMap else { return }
+            alignmentMap = partial
+            rebuildAnchorIndex()
         }
         .onDisappear {
             saveProgressIfNeeded(force: true)
@@ -1130,6 +1149,15 @@ struct ReaderView: View {
         }
         let globalIdx = wordOffset + localIndex
 
+        // Mid-alignment partial map: a word past the frontier has no dense
+        // entry, and the sparse fallback would seek to the LAST aligned
+        // chapter — maximally confusing. Say what's happening instead.
+        if let frontier = partialFrontier,
+           !partialCovers(segmentID: segmentID, wordIndex: globalIdx, map: map) {
+            showSeekNotice("Not synced yet — aligned through \(frontierLabel(frontier)) so far.")
+            return
+        }
+
         // Dense per-word times (the same data the read-along highlight uses)
         // give the tapped word its own start. Falls through to the sparse
         // nearest-anchor path only for pre-dense maps.
@@ -1173,6 +1201,33 @@ struct ReaderView: View {
             try engine.play()
         } catch {
             attachError = "Play failed after seek: \(error.localizedDescription)"
+        }
+    }
+
+    /// Whether a partial map's dense table reaches the given word. Only
+    /// meaningful while `partialFrontier` is non-nil — full maps clamp their
+    /// tails, so every word is covered by construction.
+    private func partialCovers(segmentID: String, wordIndex: Int, map: AlignmentMap) -> Bool {
+        guard let seg = map.wordTimes.first(where: { $0.segmentId == segmentID }),
+              let lastCovered = seg.wordIndices.last else { return false }
+        return wordIndex <= lastCovered
+    }
+
+    /// "1h 12m" label for the partial-alignment frontier.
+    func frontierLabel(_ seconds: Double) -> String {
+        let total = max(0, Int(seconds.rounded()))
+        let h = total / 3600
+        let m = (total % 3600) / 60
+        if h > 0 { return "\(h)h \(m)m" }
+        if m > 0 { return "\(m)m" }
+        return "\(total)s"
+    }
+
+    func showSeekNotice(_ message: String) {
+        seekNotice = message
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 3_000_000_000)
+            if seekNotice == message { seekNotice = nil }
         }
     }
 
@@ -1359,6 +1414,13 @@ struct ReaderView: View {
             if activeWordTracker.current != nil { activeWordTracker.current = nil }
             return
         }
+        // Past a partial map's transcription frontier: no dense entries exist
+        // yet, and the largest-below search would park the highlight on the
+        // frontier word indefinitely. Mirror the pre-roll guard.
+        if let frontier = partialFrontier, t >= frontier {
+            if activeWordTracker.current != nil { activeWordTracker.current = nil }
+            return
+        }
         let dw = denseWords[denseWordIndex(forTime: t)]
         let changed = dw.wordIndex != activeWordTracker.current?.wordIndex
             || dw.segmentId != activeWordTracker.current?.segmentId
@@ -1537,6 +1599,11 @@ struct ReaderView: View {
                     .progressViewStyle(.linear)
                     .tint(Theme.accent)
             }
+            if let frontier = partialFrontier, frontier > 0 {
+                Text("Synced through \(frontierLabel(frontier)) — read-along live in synced chapters")
+                    .font(.caption)
+                    .foregroundStyle(Theme.inkMuted)
+            }
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 10)
@@ -1548,8 +1615,22 @@ struct ReaderView: View {
     /// the user sees a definite outcome rather than the banner just
     /// vanishing.
     func alignmentToastBanner(_ message: String) -> some View {
+        noticeBanner(message, icon: "checkmark.circle.fill") {
+            alignment.acknowledgeFinished()
+        }
+    }
+
+    /// Transient "not synced yet" notice — same chrome as the completion
+    /// toast, different glyph, local dismissal.
+    func seekNoticeBanner(_ message: String) -> some View {
+        noticeBanner(message, icon: "hourglass") {
+            seekNotice = nil
+        }
+    }
+
+    private func noticeBanner(_ message: String, icon: String, onDismiss: @escaping () -> Void) -> some View {
         HStack(spacing: 10) {
-            Image(systemName: "checkmark.circle.fill")
+            Image(systemName: icon)
                 .foregroundStyle(Theme.accent)
                 .font(.callout)
             Text(message)
@@ -1557,9 +1638,7 @@ struct ReaderView: View {
                 .foregroundStyle(Theme.ink)
                 .lineLimit(2)
             Spacer(minLength: 8)
-            Button {
-                alignment.acknowledgeFinished()
-            } label: {
+            Button(action: onDismiss) {
                 Image(systemName: "xmark")
                     .font(.caption)
                     .foregroundStyle(Theme.inkMuted)

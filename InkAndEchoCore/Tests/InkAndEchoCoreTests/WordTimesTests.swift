@@ -106,6 +106,40 @@ struct WordTimesTests {
         let audio = [aw("a", 0)]
         #expect(aligner.computeWordTimes(bookWords: book, audio: audio, anchors: []).isEmpty)
     }
+
+    /// The partial-map variant: words past the last matched word get NO
+    /// entries (a full map clamps them to the last known time, which on a
+    /// mid-transcription partial would be the entire unread rest of the
+    /// book at junk times).
+    @Test func truncateTailOmitsWordsPastTheFrontier() {
+        let aligner = WhisperAligner()
+        let book = [
+            bw("c1", 0, "alpha"),
+            bw("c1", 1, "beta"),
+            bw("c1", 2, "gamma"),
+            bw("c1", 3, "delta"),    // past the frontier
+            bw("c2", 0, "epsilon"),  // whole chapter past the frontier
+            bw("c2", 1, "zeta"),
+        ]
+        let audio = [aw("alpha", 0), aw("gamma", 4)]
+        let anchors = [(bookIdx: 0, audioIdx: 0), (bookIdx: 2, audioIdx: 1)]
+
+        let truncated = aligner.computeWordTimes(
+            bookWords: book, audio: audio, anchors: anchors, truncateTail: true
+        )
+        #expect(truncated.count == 1)                    // c2 absent entirely
+        #expect(truncated[0].segmentId == "c1")
+        #expect(truncated[0].wordIndices == [0, 1, 2])   // delta absent
+        for i in 1..<truncated[0].starts.count {
+            #expect(truncated[0].starts[i] > truncated[0].starts[i - 1])
+        }
+
+        // The default keeps the tail clamp: every word gets an entry.
+        let full = aligner.computeWordTimes(bookWords: book, audio: audio, anchors: anchors)
+        #expect(full.count == 2)
+        #expect(full[0].wordIndices == [0, 1, 2, 3])
+        #expect(full[1].wordIndices == [0, 1])
+    }
 }
 
 /// The chunk-seam dedup: each 5-minute chunk loads 2 s past its boundary, so

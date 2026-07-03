@@ -196,7 +196,9 @@ extension ReaderView {
                     iosPageContent(useSpread: useSpread)
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
-                if alignmentRunning {
+                if let notice = seekNotice {
+                    seekNoticeBanner(notice)
+                } else if alignmentRunning {
                     alignmentBanner
                 } else if let toast = alignmentToast {
                     alignmentToastBanner(toast)
@@ -373,7 +375,9 @@ extension ReaderView {
                 phoneHeader
                 iosPageContent(useSpread: false)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
-                if alignmentRunning {
+                if let notice = seekNotice {
+                    seekNoticeBanner(notice)
+                } else if alignmentRunning {
                     alignmentBanner
                 } else if let toast = alignmentToast {
                     alignmentToastBanner(toast)

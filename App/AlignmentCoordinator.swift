@@ -20,6 +20,14 @@ final class AlignmentCoordinator {
     /// can react (`ReaderView` reloads its local AlignmentMap, etc.) and
     /// then clear back to `nil`.
     private(set) var lastFinishedBookID: UUID?
+    /// Interim alignment for the running job, truncated at the transcription
+    /// frontier (`partialCoveredThrough`, audio seconds). Never persisted —
+    /// the final map replaces it via `lastFinishedBookID`. Views observe
+    /// `partialRevision` (monotonic, bumped per emit) instead of comparing
+    /// multi-MB maps.
+    private(set) var partialMap: AlignmentMap?
+    private(set) var partialCoveredThrough: Double = 0
+    private(set) var partialRevision = 0
 
     var isRunning: Bool { currentBookID != nil }
 
@@ -42,6 +50,8 @@ final class AlignmentCoordinator {
         currentBookID = bookID
         stage = .loadingModel(model: "preparing")
         error = nil
+        partialMap = nil
+        partialCoveredThrough = 0
         // Re-arm the completion signal: it's only consumed via onChange, so
         // re-aligning the same book in one session would otherwise write the
         // same value over itself and never fire the reader's reload.
@@ -57,7 +67,12 @@ final class AlignmentCoordinator {
             guard let self, self.generation == myGeneration else { return }
             let service = AlignmentService(modelContext: modelContext)
             do {
-                try await service.runAlignment(for: book) { [weak self] s in
+                try await service.runAlignment(for: book, onPartial: { [weak self] map, coveredThrough in
+                    guard let self, self.generation == myGeneration else { return }
+                    self.partialMap = map
+                    self.partialCoveredThrough = coveredThrough
+                    self.partialRevision += 1
+                }) { [weak self] s in
                     guard let self, self.generation == myGeneration else { return }
                     self.stage = s
                 }
@@ -80,6 +95,8 @@ final class AlignmentCoordinator {
             guard self.generation == myGeneration else { return }
             self.currentBookID = nil
             self.stage = nil
+            self.partialMap = nil
+            self.partialCoveredThrough = 0
             self.lastFinishedBookID = bookID
         }
     }
@@ -93,6 +110,8 @@ final class AlignmentCoordinator {
         generation += 1
         currentBookID = nil
         stage = nil
+        partialMap = nil
+        partialCoveredThrough = 0
     }
 
     func dismissError() { error = nil }

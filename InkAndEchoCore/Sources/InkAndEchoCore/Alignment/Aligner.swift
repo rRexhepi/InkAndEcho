@@ -39,9 +39,17 @@ public struct WhisperAligner: AudioTextAligner {
     /// Align with a progress callback. The callback is invoked from a background
     /// thread; the caller is responsible for hopping to the main actor before
     /// touching UI state.
+    ///
+    /// `onPartial` (optional) receives interim `AlignmentMap`s during
+    /// transcription along with the audio-seconds frontier they cover, so
+    /// read-along can go live in the opening chapters minutes into a
+    /// ~30-minute job. Partial maps truncate at the frontier — words past it
+    /// have NO dense entries (see `computeWordTimes(truncateTail:)`) — and
+    /// must never be persisted. Same threading contract as `progress`.
     public func align(
         audioURL: URL,
         input: AlignmentInput,
+        onPartial: (@Sendable (AlignmentMap, Double) -> Void)? = nil,
         progress: @Sendable @escaping (AlignmentStage) -> Void
     ) async throws -> AlignmentMap {
         let totalAudioSeconds: Double = {
@@ -96,6 +104,7 @@ public struct WhisperAligner: AudioTextAligner {
 
         var audioWords: [AudioWord] = []
         var loadCursor: Double = 0
+        var chunkIndex = 0
         // `totalAudioSeconds <= 0` means the duration probe failed: take one
         // full-chunk pass and bail via the in-loop break. With a known
         // duration, loop strictly against it — comparing against
@@ -194,6 +203,21 @@ public struct WhisperAligner: AudioTextAligner {
 
             loadCursor = chunkEnd
             if totalAudioSeconds <= 0 { break }
+
+            chunkIndex += 1
+            // Emit a partial map for the transcript so far. Throttle: the
+            // first three chunks unconditionally (chapter 1 word-follow goes
+            // live after ~19 s), then every 3rd — each emit re-runs the
+            // greedy matcher over the whole accumulated transcript. Skip the
+            // final chunk; the full map lands right after the loop.
+            if let onPartial, !audioWords.isEmpty, loadCursor < totalAudioSeconds,
+               chunkIndex <= 3 || chunkIndex % 3 == 0 {
+                let sorted = audioWords.sorted {
+                    ($0.startSeconds, $0.endSeconds) < ($1.startSeconds, $1.endSeconds)
+                }
+                let partial = alignWords(audio: sorted, segments: input.segments, truncateTail: true)
+                onPartial(partial, loadCursor)
+            }
         }
 
         // Overlap zones can interleave slightly (chunk i's tail word may
@@ -214,7 +238,11 @@ public struct WhisperAligner: AudioTextAligner {
 
     // MARK: - Greedy alignment
 
-    private func alignWords(audio: [AudioWord], segments: [TextSegment]) -> AlignmentMap {
+    private func alignWords(
+        audio: [AudioWord],
+        segments: [TextSegment],
+        truncateTail: Bool = false
+    ) -> AlignmentMap {
         // Flatten book words with their (segmentId, segmentLocalIndex) labels.
         // Local index here matches the wordIndex the reader's UI looks up.
         var bookWords: [BookWord] = []
@@ -283,7 +311,12 @@ public struct WhisperAligner: AudioTextAligner {
 
         let sentences = deriveSentenceAnchors(words: wordAnchors, segments: segments)
         let audioWordStarts = audio.map { $0.startSeconds }
-        let wordTimes = computeWordTimes(bookWords: bookWords, audio: audio, anchors: validated)
+        let wordTimes = computeWordTimes(
+            bookWords: bookWords,
+            audio: audio,
+            anchors: validated,
+            truncateTail: truncateTail
+        )
 
         return AlignmentMap(
             words: wordAnchors,
@@ -453,10 +486,18 @@ public struct WhisperAligner: AudioTextAligner {
     /// forced strictly increasing so every word owns a distinct slice and the
     /// reader's time→word lookup is unambiguous. Pure function, no Apple deps,
     /// so it ports to the Flutter aligner unchanged.
+    ///
+    /// `truncateTail` is the partial-map variant: words past the last matched
+    /// word get NO entries instead of clamping to its time. On a full map the
+    /// clamp is right (the tail is front/back matter the narrator skipped),
+    /// but on a mid-transcription partial the "tail" is the entire unread
+    /// rest of the book — clamped times would send the follow path sprinting
+    /// through junk-timed words the moment playback crossed the frontier.
     func computeWordTimes(
         bookWords: [BookWord],
         audio: [AudioWord],
-        anchors: [(bookIdx: Int, audioIdx: Int)]
+        anchors: [(bookIdx: Int, audioIdx: Int)],
+        truncateTail: Bool = false
     ) -> [SegmentWordTimes] {
         let n = bookWords.count
         guard n > 0, !audio.isEmpty, !anchors.isEmpty else { return [] }
@@ -509,11 +550,17 @@ public struct WhisperAligner: AudioTextAligner {
             }
             times[b] = tb
         }
-        if last < n { for i in last..<n { times[i] = known[last]! } }
+        let emitCount: Int
+        if truncateTail {
+            emitCount = last + 1
+        } else {
+            if last < n { for i in last..<n { times[i] = known[last]! } }
+            emitCount = n
+        }
 
         // Strictly increasing so each word owns a distinct time slice.
-        if n > 1 {
-            for i in 1..<n where times[i] <= times[i - 1] {
+        if emitCount > 1 {
+            for i in 1..<emitCount where times[i] <= times[i - 1] {
                 times[i] = times[i - 1] + 0.001
             }
         }
@@ -524,7 +571,7 @@ public struct WhisperAligner: AudioTextAligner {
         var curSeg: String?
         var idxs: [Int] = []
         var starts: [Double] = []
-        for i in 0..<n {
+        for i in 0..<emitCount {
             let bw = bookWords[i]
             if bw.segmentId != curSeg {
                 if let s = curSeg {

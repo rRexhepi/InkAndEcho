@@ -18,8 +18,13 @@ struct AlignmentService {
     /// idle timer for the duration. Force-quit (swipe-away in app
     /// switcher) still kills the process — iOS doesn't offer any escape
     /// hatch for that.
+    /// `onPartial` receives interim maps while transcription runs (with the
+    /// audio-seconds frontier they cover) so the reader can light up synced
+    /// chapters mid-job. Partials are never written to disk — only the final
+    /// map lands in `alignment.json`.
     func runAlignment(
         for book: Book,
+        onPartial: @MainActor @escaping (AlignmentMap, Double) -> Void = { _, _ in },
         progress: @MainActor @escaping (AlignmentStage) -> Void = { _ in }
     ) async throws {
         guard let ebookURL = book.resolvedEbookURL,
@@ -69,7 +74,15 @@ struct AlignmentService {
         let input = AlignmentInput(segments: imported.segments)
 
         let aligner = WhisperAligner()
-        let map = try await aligner.align(audioURL: audioURL, input: input) { stage in
+        let map = try await aligner.align(
+            audioURL: audioURL,
+            input: input,
+            onPartial: { partial, coveredThrough in
+                Task { @MainActor in
+                    onPartial(partial, coveredThrough)
+                }
+            }
+        ) { stage in
             // WhisperKit invokes this from its own queue; bounce to main.
             Task { @MainActor in
                 progress(stage)
