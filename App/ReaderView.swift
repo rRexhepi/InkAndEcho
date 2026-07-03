@@ -916,6 +916,13 @@ struct ReaderView: View {
                 .flatMap({ id in segments.firstIndex(where: { $0.id == id }) }) else {
             return ""
         }
+        // Page-accurate percent when paginated (same flat sequence as the
+        // "X of Y" footer); chapter-granular fallback for scroll mode,
+        // where the page index means nothing.
+        if paginated, flatTotalPages > 0, let id = selectedSegmentID {
+            let global = flatGlobalIndex(segmentID: id, pageIdx: currentPageIndex)
+            return "\(Int((Double(global + 1) / Double(flatTotalPages)) * 100))%"
+        }
         let percent = Int((Double(segmentIndex + 1) / Double(segments.count)) * 100)
         return "\(percent)%"
     }
@@ -997,7 +1004,7 @@ struct ReaderView: View {
                 }
             }
             Spacer(minLength: 0)
-            Text("\(pageIndex + 1)")
+            Text(pageFooterLabel(segment: segment, pageIndex: pageIndex))
                 .font(.system(.caption2, design: .monospaced))
                 .foregroundStyle(Theme.inkMuted)
                 .frame(maxWidth: .infinity, alignment: .center)
@@ -1007,6 +1014,14 @@ struct ReaderView: View {
         .padding(.top, pageVerticalPadding)
         .padding(.bottom, 40)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+    }
+
+    /// Book-global "X of Y" for the page footer. The chapter-local number
+    /// it replaces read as a bug — the curl exposes one flat sequence
+    /// across chapters, so the footer should count the same way.
+    func pageFooterLabel(segment: TextSegment, pageIndex: Int) -> String {
+        guard flatTotalPages > 0 else { return "\(pageIndex + 1)" }
+        return "\(flatGlobalIndex(segmentID: segment.id, pageIdx: pageIndex) + 1) of \(flatTotalPages)"
     }
 
     /// Per-platform column width and gutter for `pageSurface`. iPhone gets a

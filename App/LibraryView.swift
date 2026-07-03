@@ -3,11 +3,31 @@ import SwiftData
 import UniformTypeIdentifiers
 import InkAndEchoCore
 
+/// Library sort orders. In-memory over an unsorted `@Query`:
+/// `SortDescriptor` can't traverse the optional `progress` relationship,
+/// and "recently read" lives on `progress.lastReadAt`.
+enum LibrarySort: String, CaseIterable, Identifiable {
+    case lastRead
+    case added
+    case title
+
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .lastRead: return "Recently read"
+        case .added:    return "Recently added"
+        case .title:    return "Title"
+        }
+    }
+}
+
 struct LibraryView: View {
     @Environment(\.modelContext) private var modelContext
     @Environment(AlignmentCoordinator.self) private var alignment
     @Environment(AudioCoordinator.self) private var audio
-    @Query(sort: \Book.addedAt, order: .reverse) private var books: [Book]
+    @Query private var books: [Book]
+    @AppStorage("inkandecho.librarySort") private var librarySortRaw: String = LibrarySort.lastRead.rawValue
     @State private var selectedBook: Book?
     @State private var showingImporter = false
     @State private var importing = false
@@ -105,6 +125,19 @@ struct LibraryView: View {
                         .disabled(importing)
                         .tint(Theme.accent)
                     }
+                    ToolbarItem(placement: .topBarTrailing) {
+                        Menu {
+                            Picker("Sort by", selection: librarySort) {
+                                ForEach(LibrarySort.allCases) { sort in
+                                    Text(sort.label).tag(sort)
+                                }
+                            }
+                        } label: {
+                            Image(systemName: "arrow.up.arrow.down")
+                                .font(.system(size: 14, weight: .medium))
+                        }
+                        .tint(Theme.inkSoft)
+                    }
                     ToolbarItem(placement: .topBarLeading) {
                         Button {
                             showSettings = true
@@ -142,25 +175,62 @@ struct LibraryView: View {
         }
     }
 
+    private var librarySort: Binding<LibrarySort> {
+        Binding(
+            get: { LibrarySort(rawValue: librarySortRaw) ?? .lastRead },
+            set: { librarySortRaw = $0.rawValue }
+        )
+    }
+
+    /// Resume-first: never-opened books fall back to `addedAt`, so a fresh
+    /// import still surfaces at the top of "Recently read".
+    private var sortedBooks: [Book] {
+        switch librarySort.wrappedValue {
+        case .lastRead:
+            return books.sorted {
+                ($0.progress?.lastReadAt ?? $0.addedAt) > ($1.progress?.lastReadAt ?? $1.addedAt)
+            }
+        case .added:
+            return books.sorted { $0.addedAt > $1.addedAt }
+        case .title:
+            return books.sorted {
+                $0.title.localizedStandardCompare($1.title) == .orderedAscending
+            }
+        }
+    }
+
+    /// Most recently read book — the Continue hero card's subject.
+    private var continueBook: Book? {
+        books.compactMap { book in book.progress.map { (book, $0.lastReadAt) } }
+            .max(by: { $0.1 < $1.1 })?.0
+    }
+
     private var grid: some View {
         Group {
             if books.isEmpty {
                 LibraryEmptyState(onImport: { showingImporter = true })
             } else {
                 ScrollView {
-                    LazyVGrid(columns: gridColumns, spacing: 28) {
-                        ForEach(books) { book in
-                            Button {
-                                selectedBook = book
-                            } label: {
-                                BookCard(book: book)
+                    VStack(spacing: 24) {
+                        if let hero = continueBook {
+                            ContinueCard(book: hero) {
+                                selectedBook = hero
                             }
-                            .buttonStyle(.plain)
-                            .contextMenu {
-                                Button(role: .destructive) {
-                                    deleteBook(book)
+                        }
+                        LazyVGrid(columns: gridColumns, spacing: 28) {
+                            ForEach(sortedBooks) { book in
+                                Button {
+                                    selectedBook = book
                                 } label: {
-                                    Label("Remove from Library", systemImage: "trash")
+                                    BookCard(book: book)
+                                }
+                                .buttonStyle(.plain)
+                                .contextMenu {
+                                    Button(role: .destructive) {
+                                        deleteBook(book)
+                                    } label: {
+                                        Label("Remove from Library", systemImage: "trash")
+                                    }
                                 }
                             }
                         }
@@ -324,6 +394,120 @@ private struct LibraryMiniPlayer: View {
     }
 }
 
+/// Listening progress + last-read copy shared by the Continue card and
+/// BookCard, so the two surfaces can't disagree. The fraction comes ONLY
+/// from audio time over the known duration — text-only books have no
+/// persisted denominator (`Book.totalPages` is 0 for EPUB/MOBI), so they
+/// show no invented percent.
+@MainActor
+private enum BookProgressDisplay {
+    static let relative = RelativeDateTimeFormatter()
+
+    static func fraction(of book: Book) -> Double? {
+        guard book.totalDurationSeconds > 0,
+              let seconds = book.progress?.currentAudioSeconds, seconds > 0 else { return nil }
+        return min(1, seconds / book.totalDurationSeconds)
+    }
+
+    static func lastReadLabel(of book: Book) -> String? {
+        book.progress.map { relative.localizedString(for: $0.lastReadAt, relativeTo: .now) }
+    }
+
+    /// 2 pt accent bar along a cover's bottom edge (DESIGN.md's progress
+    /// hairline), sized by the listening fraction. Empty when no fraction.
+    @ViewBuilder
+    static func hairline(for book: Book) -> some View {
+        if let fraction = fraction(of: book) {
+            GeometryReader { geo in
+                Rectangle()
+                    .fill(Theme.accent)
+                    .frame(width: max(2, geo.size.width * fraction))
+            }
+            .frame(height: 2)
+            .padding(.horizontal, 2)   // stay inside the cover's 4 pt corner radius
+        }
+    }
+}
+
+/// Resume-first hero: the most recently read book, one tap back into it.
+/// Opening is all it does — NO autoplay, the reader deliberately restores
+/// paused.
+private struct ContinueCard: View {
+    let book: Book
+    let onOpen: () -> Void
+
+    var body: some View {
+        Button(action: onOpen) {
+            HStack(spacing: 14) {
+                cover
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("Continue")
+                        .font(.system(size: 10, weight: .semibold))
+                        .tracking(1.2)
+                        .textCase(.uppercase)
+                        .foregroundStyle(Theme.accent)
+                    Text(book.title)
+                        .font(.system(size: 16, design: .serif))
+                        .fontWeight(.semibold)
+                        .foregroundStyle(Theme.ink)
+                        .lineLimit(1)
+                    Text(detail)
+                        .font(.system(size: 12, design: .serif))
+                        .foregroundStyle(Theme.inkMuted)
+                        .lineLimit(1)
+                }
+                Spacer(minLength: 0)
+                Image(systemName: "arrow.forward.circle.fill")
+                    .font(.system(size: 24))
+                    .foregroundStyle(Theme.accent)
+            }
+            .padding(14)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(Theme.canvasCool)
+            .overlay(
+                RoundedRectangle(cornerRadius: 10)
+                    .stroke(Theme.hairline, lineWidth: 1)
+            )
+            .clipShape(RoundedRectangle(cornerRadius: 10))
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+
+    private var detail: String {
+        var parts: [String] = []
+        if let fraction = BookProgressDisplay.fraction(of: book) {
+            parts.append("\(Int((fraction * 100).rounded()))%")
+        }
+        if let lastRead = BookProgressDisplay.lastReadLabel(of: book) {
+            parts.append(lastRead)
+        }
+        return parts.isEmpty ? book.author : parts.joined(separator: " · ")
+    }
+
+    @ViewBuilder
+    private var cover: some View {
+        Group {
+            if let data = book.coverImageData, let image = Image(platformData: data) {
+                image
+                    .resizable()
+                    .aspectRatio(contentMode: .fill)
+            } else {
+                RoundedRectangle(cornerRadius: 3)
+                    .fill(Theme.canvasDeep)
+                    .overlay(
+                        Image(systemName: "book.closed")
+                            .font(.system(size: 16))
+                            .foregroundStyle(Theme.inkMuted)
+                    )
+            }
+        }
+        .frame(width: 44, height: 66)
+        .overlay(alignment: .bottom) { BookProgressDisplay.hairline(for: book) }
+        .clipShape(RoundedRectangle(cornerRadius: 3))
+    }
+}
+
 private struct BookCard: View {
     let book: Book
     @Environment(AlignmentCoordinator.self) private var alignment
@@ -331,6 +515,9 @@ private struct BookCard: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             cover
+                .overlay(alignment: .bottom) {
+                    BookProgressDisplay.hairline(for: book)
+                }
                 .overlay(alignment: .bottomLeading) {
                     if alignment.isRunning(for: book.id) {
                         aligningBadge
@@ -348,6 +535,12 @@ private struct BookCard: View {
                     .italic()
                     .foregroundStyle(Theme.inkMuted)
                     .lineLimit(1)
+                if let lastRead = BookProgressDisplay.lastReadLabel(of: book) {
+                    Text(lastRead)
+                        .font(.system(size: 10))
+                        .foregroundStyle(Theme.inkMuted)
+                        .padding(.top, 2)
+                }
                 if book.audiobookFileURL == nil {
                     Text("NO AUDIO")
                         .font(.system(size: 9, weight: .semibold))

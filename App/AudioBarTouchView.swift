@@ -101,7 +101,7 @@ struct AudioBarTouchView: View {
                         Spacer(minLength: 0)
                     }
                 }
-                ScrubberRow(engine: engine)
+                ScrubberRow(engine: engine, chapterEndTime: chapterEndTime)
             }
         }
     }
@@ -351,8 +351,13 @@ struct AudioBarTouchView: View {
 /// PVC gesture handling during playback).
 private struct ScrubberRow: View {
     let engine: AudioEngine
+    /// Narration end of the current chapter, same closure the sleep menu
+    /// reads. Non-nil (and ahead of the playhead) puts a quiet
+    /// "Nm left in chapter" between the timestamps.
+    var chapterEndTime: (() -> TimeInterval?)? = nil
     @State private var displayTime: TimeInterval = 0
     @State private var displayDuration: TimeInterval = 0.001
+    @State private var chapterMinutesLeft: Int?
     @State private var isScrubbing = false
 
     private static let tickInterval: TimeInterval = 1.0 / 3.0
@@ -381,6 +386,10 @@ private struct ScrubberRow: View {
             HStack {
                 Text(formatTime(displayTime))
                 Spacer()
+                if let minutes = chapterMinutesLeft {
+                    Text("\(minutes)m left in chapter")
+                    Spacer()
+                }
                 Text(formatTime(displayDuration))
             }
             .font(.system(size: 11, design: .monospaced))
@@ -398,6 +407,13 @@ private struct ScrubberRow: View {
         guard !isScrubbing else { return }
         displayTime = engine.currentTime
         displayDuration = max(engine.duration, 0.001)
+        // Listening minutes, not audio minutes — divide by rate so 2×
+        // listeners see the time they'll actually wait.
+        if let end = chapterEndTime?(), end > displayTime, engine.rate > 0 {
+            chapterMinutesLeft = max(1, Int(((end - displayTime) / Double(engine.rate) / 60).rounded()))
+        } else {
+            chapterMinutesLeft = nil
+        }
     }
 
     private func formatTime(_ seconds: TimeInterval) -> String {

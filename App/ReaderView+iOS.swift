@@ -538,6 +538,7 @@ extension ReaderView {
                 onAlign: nil,
                 alignmentExists: alignmentMap != nil,
                 onRequestExpand: { iosShowAudioSheet = true },
+                chapterEndTime: { currentChapterEndSeconds() },
                 loadError: audioLoadErrorMessage,
                 onRetry: { retryAudioLoad() }
             )
