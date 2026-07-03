@@ -75,6 +75,10 @@ final class AlignmentCoordinator {
             do {
                 let map = try await service.runAlignment(for: book, onPartial: { [weak self] map, coveredThrough in
                     guard let self, self.generation == myGeneration else { return }
+                    // Emissions hop to the main actor as unstructured Tasks,
+                    // which aren't strictly FIFO — never let a late-arriving
+                    // older partial regress the frontier.
+                    guard coveredThrough > self.partialCoveredThrough else { return }
                     self.partialMap = map
                     self.partialCoveredThrough = coveredThrough
                     self.partialRevision += 1
