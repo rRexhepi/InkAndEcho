@@ -217,9 +217,12 @@ struct ReaderView: View {
                 // User-driven chapter switch: start at the first page, and
                 // back narration-follow off briefly — same contract as a
                 // manual page turn, or follow would yank the user straight
-                // back to the narrated chapter.
+                // back to the narrated chapter. Shadowing switches off too:
+                // the user moved elsewhere, so a pause at the (still
+                // narrating) armed sentence would read as broken playback.
                 currentPageIndex = 0
                 followState.suspendedUntil = Date().addingTimeInterval(4)
+                audio.disarmShadowing()
             }
             refreshActiveWord()
             saveProgressIfNeeded(force: true)
@@ -1521,7 +1524,52 @@ struct ReaderView: View {
             audioIndex: -1,
             confidence: 1
         )
+        // Before followNarration: a shadow pause drops the engine out of
+        // .playing, so follow won't yank the page at the very boundary.
+        updateShadowing(dw)
         followNarration()
+    }
+
+    /// Shadowing tick: watch the armed sentence and pause at its end. Word
+    /// jumps that aren't the natural next-word crossing (scrubs, skips,
+    /// tap-to-play) switch the mode off instead of pausing — a manual seek
+    /// must never leave a surprise pause armed behind it.
+    func updateShadowing(_ dw: DenseWord) {
+        guard audio.shadowingEnabled, engine.state == .playing else { return }
+        guard let armed = audio.shadowingArmed else {
+            // Just enabled, resumed after a shadow pause, or stepped by the
+            // sentence buttons: arm the sentence being narrated right now.
+            if let segment = segments.first(where: { $0.id == dw.segmentId }),
+               let bounds = sentenceBounds(containing: dw.wordIndex, in: segment) {
+                audio.shadowingArmed = ShadowedSentence(
+                    segmentID: dw.segmentId, start: bounds.start, end: bounds.end)
+            }
+            return
+        }
+        if dw.segmentId == armed.segmentID, (armed.start..<armed.end).contains(dw.wordIndex) {
+            return
+        }
+        // Ticks arrive several times a second, so a natural crossing lands
+        // within a few words past the end — or in the opening words of the
+        // NEXT chapter when the sentence closed this one. Anything farther
+        // is a manual seek.
+        let slack = 8
+        let crossedSameChapter = dw.segmentId == armed.segmentID
+            && dw.wordIndex >= armed.end && dw.wordIndex < armed.end + slack
+        let crossedIntoNextChapter = dw.segmentId != armed.segmentID
+            && isNextSegment(dw.segmentId, after: armed.segmentID)
+            && dw.wordIndex < slack
+        if crossedSameChapter || crossedIntoNextChapter {
+            audio.shadowingArmed = nil
+            engine.pause()
+        } else {
+            audio.disarmShadowing()
+        }
+    }
+
+    private func isNextSegment(_ id: String, after previous: String) -> Bool {
+        guard let i = segments.firstIndex(where: { $0.id == previous }) else { return false }
+        return segments.indices.contains(i + 1) && segments[i + 1].id == id
     }
 
     /// Chapter-global word range of the sentence containing `word`, via the
@@ -1579,6 +1627,12 @@ struct ReaderView: View {
             target = sentenceBounds(containing: current.end, in: segment)?.start
         }
         guard let target else { return }
+        // Sentence steps are shadowing-native (replay = "say it again"), so
+        // they re-arm rather than disarm: clear the armed sentence and let
+        // the tick arm whatever the seek lands in. Without this, "next"
+        // lands exactly on the armed end and false-triggers the crossing
+        // pause.
+        audio.shadowingArmed = nil
         seekToWord(segmentID: segment.id, wordOffset: target, localIndex: 0)
     }
 

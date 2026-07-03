@@ -12,6 +12,15 @@ enum SleepTarget: Equatable {
     case audioTime(TimeInterval)
 }
 
+/// One armed sentence for shadowing: the reader's tick pauses playback when
+/// the narrated word crosses `end`. Word indices are chapter-global (the
+/// reader's dense-word space).
+struct ShadowedSentence: Equatable {
+    let segmentID: String
+    let start: Int
+    let end: Int
+}
+
 /// App-level owner of the single shared `AudioEngine`. Lives for the whole
 /// session (held by `InkAndEchoApp`, injected via environment) so audio keeps
 /// playing when a `ReaderView` is popped — the foundation for lock-screen
@@ -122,6 +131,29 @@ final class AudioCoordinator {
         }
     }
 
+    // MARK: - Shadowing
+
+    /// Shadowing (listen, pause, repeat aloud): when on, the reader's
+    /// read-along tick pauses playback at the end of each narrated sentence;
+    /// pressing play resumes into the next sentence and re-arms. Lives here
+    /// so the audio bar's toggle, the rate menu's disarm, and the reader's
+    /// tick share one flag with no extra plumbing. iOS only — it needs the
+    /// dense word times WhisperKit produces.
+    var shadowingEnabled = false {
+        didSet { if !shadowingEnabled { shadowingArmed = nil } }
+    }
+    /// The sentence the tick is watching; cleared by each shadow pause (and
+    /// by the sentence steppers) so the next play re-arms on whatever
+    /// sentence the playhead lands in.
+    var shadowingArmed: ShadowedSentence?
+
+    /// Rate changes, manual seeks, and chapter picks all switch the mode
+    /// off — shadowing that keeps pausing after the user moved elsewhere
+    /// reads as broken playback.
+    func disarmShadowing() {
+        shadowingEnabled = false
+    }
+
     /// Present a book's audio when its reader appears.
     ///
     /// - Same book already loaded: no-op, returns true (re-opening keeps the
@@ -159,6 +191,7 @@ final class AudioCoordinator {
     func unload(ifBookID id: UUID? = nil) {
         if let id, id != loadedBookID { return }
         cancelSleepTimer()
+        disarmShadowing()
         engine.stop()
         loadedBookID = nil
         loadedTitle = ""
@@ -169,8 +202,9 @@ final class AudioCoordinator {
     private func load(book: Book, url: URL) async -> Bool {
         // A sleep target belongs to the book it was armed on — especially an
         // audio-time (end-of-chapter) one, which is meaningless on another
-        // book's timeline.
+        // book's timeline. Same for an armed shadowing sentence.
         cancelSleepTimer()
+        disarmShadowing()
         do {
             try await engine.load(url: url)
             loadFailureMessage = nil

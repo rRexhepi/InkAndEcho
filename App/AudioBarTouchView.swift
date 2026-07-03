@@ -177,8 +177,9 @@ struct AudioBarTouchView: View {
         }
     }
 
-    /// Sentence controls: previous / replay / next. Same 44 pt targets and
-    /// skip haptic as the ±15 s buttons — they're seeks, just word-precise.
+    /// Sentence controls: previous / replay / next, plus the shadowing
+    /// toggle. Same 44 pt targets and skip haptic as the ±15 s buttons —
+    /// they're seeks, just word-precise.
     private func sentenceRow(step: @escaping (Int) -> Void) -> some View {
         HStack(spacing: 8) {
             sentenceButton(symbol: "backward.frame", label: "Previous sentence") { step(-1) }
@@ -191,7 +192,39 @@ struct AudioBarTouchView: View {
                 .foregroundStyle(Theme.inkMuted)
                 .padding(.leading, 2)
             Spacer(minLength: 0)
+            shadowToggle
         }
+    }
+
+    /// Shadowing: listen to a sentence, pause, repeat it aloud. The
+    /// reader's read-along tick does the pausing; this just flips the
+    /// coordinator flag.
+    private var shadowToggle: some View {
+        Button {
+            if audio.shadowingEnabled {
+                audio.disarmShadowing()
+            } else {
+                audio.shadowingEnabled = true
+            }
+            rateTapCount += 1
+        } label: {
+            HStack(spacing: 6) {
+                Image(systemName: "person.wave.2")
+                    .font(.system(size: 11, weight: .semibold))
+                Text("Shadow")
+                    .font(.system(size: 12, weight: .medium))
+            }
+            .foregroundStyle(audio.shadowingEnabled ? Theme.accent : Theme.inkSoft)
+            .padding(.horizontal, 14)
+            .padding(.vertical, 10)
+            .background(audio.shadowingEnabled ? Theme.accent.opacity(0.14) : Theme.canvasDeep.opacity(0.5))
+            .clipShape(Capsule())
+            .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(audio.shadowingEnabled
+            ? "Turn off shadowing"
+            : "Shadowing: pause after each sentence")
     }
 
     private func sentenceButton(symbol: String, label: String, action: @escaping () -> Void) -> some View {
@@ -232,6 +265,9 @@ struct AudioBarTouchView: View {
                 Button {
                     engine.setRate(rate)
                     UserDefaults.standard.set(Double(rate), forKey: AppSettings.playbackRateKey)
+                    // A deliberate rate pick ends a shadowing session — the
+                    // user is steering playback themselves now.
+                    audio.disarmShadowing()
                     rateTapCount += 1
                 } label: {
                     HStack {
