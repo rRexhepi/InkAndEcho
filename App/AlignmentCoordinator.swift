@@ -111,6 +111,12 @@ final class AlignmentCoordinator {
                 }
             }
             guard self.generation == myGeneration else { return }
+            // Retire this job's callbacks BEFORE clearing: emissions hop to
+            // the main actor as unstructured Tasks, so a straggler landing
+            // after this epilogue would pass the generation guard and pin a
+            // multi-MB partial map (and a stale stage) on this app-lifetime
+            // object until the next job.
+            self.generation += 1
             self.currentBookID = nil
             self.currentBookTitle = nil
             self.stage = nil
