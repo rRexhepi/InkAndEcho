@@ -125,7 +125,9 @@ struct ReaderView: View {
     /// (10s of thousands of entries on a long audiobook) every audio tick
     /// — 10 Hz × O(N) blocked the main thread enough to freeze playback.
     @State var anchorsBySegment: [String: [WordAnchor]] = [:]
-    @State var anchorsBySegmentAudioIdx: [String: [WordAnchor]] = [:]
+    /// Monotonic token for `applyAlignmentMap`: the off-main index build of
+    /// a superseded apply must not clobber its successor's state.
+    @State var alignmentApplyGeneration = 0
     /// Every book word with its narration start time, flattened across all
     /// chapters and time-sorted. The read-along highlight binary-searches this.
     @State var denseWords: [DenseWord] = []
@@ -235,8 +237,7 @@ struct ReaderView: View {
             // live in already-transcribed chapters mid-alignment.
             guard alignment.isRunning(for: book.id),
                   let partial = alignment.partialMap else { return }
-            alignmentMap = partial
-            rebuildAnchorIndex()
+            Task { await applyAlignmentMap(partial) }
         }
         .onDisappear {
             saveProgressIfNeeded(force: true)
@@ -1784,7 +1785,7 @@ struct ReaderView: View {
         // In this order, the view-side task always runs after and wins.
         recomputeFlatPageBoundaries()
         await loadAudioIfPresent()
-        loadAlignmentIfPresent()
+        await loadAlignmentIfPresent()
         restoreProgress()
     }
 
@@ -2049,56 +2050,26 @@ struct ReaderView: View {
         }
     }
 
-    func loadAlignmentIfPresent() {
+    func loadAlignmentIfPresent() async {
         let service = AlignmentService(modelContext: modelContext)
-        alignmentMap = service.loadAlignmentMap(for: book)
-        rebuildAnchorIndex()
+        let map = await service.loadAlignmentMap(for: book)
+        await applyAlignmentMap(map)
     }
 
-    /// Group `alignmentMap.words` by segment ID once. The audio tick
-    /// callback hits this lookup ~10×/sec on a large alignment map; the
-    /// pre-sorted variants avoid re-sorting on every tick too. Builds
-    /// both an audioIndex-sorted and a startSeconds-sorted view since
-    /// `refreshActiveWord` picks between them based on whether the map
-    /// has audioWordStarts populated.
-    func rebuildAnchorIndex() {
-        guard let map = alignmentMap else {
-            anchorsBySegment = [:]
-            anchorsBySegmentAudioIdx = [:]
-            denseWords = []
-            roughSegments = []
-            return
-        }
-        roughSegments = map.roughSegmentIDs()
-        var byStart: [String: [WordAnchor]] = [:]
-        var byAudio: [String: [WordAnchor]] = [:]
-        for anchor in map.words {
-            byStart[anchor.segmentId, default: []].append(anchor)
-            if anchor.audioIndex >= 0 {
-                byAudio[anchor.segmentId, default: []].append(anchor)
-            }
-        }
-        for k in byStart.keys {
-            byStart[k]?.sort { $0.startSeconds < $1.startSeconds }
-        }
-        for k in byAudio.keys {
-            byAudio[k]?.sort { $0.audioIndex < $1.audioIndex }
-        }
-        anchorsBySegment = byStart
-        anchorsBySegmentAudioIdx = byAudio
-
-        // Flatten dense per-word times into one time-sorted list for the
-        // read-along highlight. Stored per-segment in reading order, so the
-        // concatenation is already time-ordered; sort defensively.
-        var dense: [DenseWord] = []
-        for swt in map.wordTimes {
-            let count = min(swt.wordIndices.count, swt.starts.count)
-            for i in 0..<count {
-                dense.append(DenseWord(start: swt.starts[i], segmentId: swt.segmentId, wordIndex: swt.wordIndices[i]))
-            }
-        }
-        dense.sort { $0.start < $1.start }
-        denseWords = dense
+    /// Swap the reader's alignment map and rebuild the derived indexes off
+    /// the main actor — flattening + sorting hundreds of thousands of dense
+    /// entries used to run on @MainActor at every book open and repeatedly
+    /// per align cycle. The generation guard drops a build that a newer
+    /// apply (partial swap, attach reset) superseded while it ran.
+    func applyAlignmentMap(_ map: AlignmentMap?) async {
+        alignmentApplyGeneration += 1
+        let generation = alignmentApplyGeneration
+        alignmentMap = map
+        let indexes = await AlignmentIndexes.build(from: map)
+        guard generation == alignmentApplyGeneration else { return }
+        anchorsBySegment = indexes.anchorsBySegment
+        denseWords = indexes.denseWords
+        roughSegments = indexes.roughSegments
     }
 
     // MARK: - Alignment
@@ -2115,10 +2086,11 @@ struct ReaderView: View {
     /// completion. The coordinator runs on a single shared Task, so this
     /// is the only spot we re-read the JSON.
     func reloadAlignmentAfterCompletion() {
-        let service = AlignmentService(modelContext: modelContext)
-        if let map = service.loadAlignmentMap(for: book) {
-            alignmentMap = map
-            rebuildAnchorIndex()
+        Task { @MainActor in
+            let service = AlignmentService(modelContext: modelContext)
+            if let map = await service.loadAlignmentMap(for: book) {
+                await applyAlignmentMap(map)
+            }
         }
     }
 
@@ -2221,8 +2193,7 @@ struct ReaderView: View {
                 // play-from-here. Without this the UI keeps "Re-align"
                 // available against stale anchors until the next book
                 // open.
-                alignmentMap = nil
-                rebuildAnchorIndex()
+                await applyAlignmentMap(nil)
                 // The audiobook file changed on disk; force the shared
                 // engine to drop and reload it (a plain present() would
                 // no-op since the bookID is unchanged).
@@ -2265,10 +2236,54 @@ final class ActiveWordTracker {
 
 /// One book word with its narration start time. The read-along highlight
 /// binary-searches a time-sorted array of these against `engine.currentTime`.
-struct DenseWord {
+struct DenseWord: Sendable {
     let start: Double
     let segmentId: String
     let wordIndex: Int
+}
+
+/// Derived lookup structures for one alignment map, built off the main
+/// actor by `ReaderView.applyAlignmentMap` — the flatten + sort touches
+/// every dense entry (hundreds of thousands on a long audiobook).
+struct AlignmentIndexes: Sendable {
+    /// Anchors grouped by segment, start-time sorted. The audio tick hits
+    /// this lookup ~10×/sec; pre-sorting avoids re-sorting per tick.
+    var anchorsBySegment: [String: [WordAnchor]] = [:]
+    /// Every book word with its narration start time, flattened across all
+    /// chapters and time-sorted for the read-along binary search.
+    var denseWords: [DenseWord] = []
+    /// Chapters under the rough-match threshold.
+    var roughSegments: Set<String> = []
+
+    /// Runs on the cooperative pool (nonisolated async), never the
+    /// caller's actor.
+    nonisolated static func build(from map: AlignmentMap?) async -> AlignmentIndexes {
+        guard let map else { return AlignmentIndexes() }
+        var indexes = AlignmentIndexes()
+        indexes.roughSegments = map.roughSegmentIDs()
+
+        var byStart: [String: [WordAnchor]] = [:]
+        for anchor in map.words {
+            byStart[anchor.segmentId, default: []].append(anchor)
+        }
+        for k in byStart.keys {
+            byStart[k]?.sort { $0.startSeconds < $1.startSeconds }
+        }
+        indexes.anchorsBySegment = byStart
+
+        // Stored per-segment in reading order, so the concatenation is
+        // already time-ordered; sort defensively.
+        var dense: [DenseWord] = []
+        for swt in map.wordTimes {
+            let count = min(swt.wordIndices.count, swt.starts.count)
+            for i in 0..<count {
+                dense.append(DenseWord(start: swt.starts[i], segmentId: swt.segmentId, wordIndex: swt.wordIndices[i]))
+            }
+        }
+        dense.sort { $0.start < $1.start }
+        indexes.denseWords = dense
+        return indexes
+    }
 }
 
 /// Whitespace tokenizer every word-indexing consumer shares — pagination,

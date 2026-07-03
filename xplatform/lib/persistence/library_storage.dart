@@ -1,5 +1,6 @@
 import 'dart:convert';
 import 'dart:io';
+import 'dart:isolate';
 
 import 'package:path_provider/path_provider.dart';
 
@@ -165,7 +166,11 @@ class LibraryStorage {
     if (book.alignmentPath == null) return null;
     final f = File(book.alignmentPath!);
     if (!f.existsSync()) return null;
-    return AlignmentMap.fromJsonString(await f.readAsString());
+    // Multi-MB JSON: parse off the main isolate so opening an aligned book
+    // doesn't jank the UI. (Isolate.run rather than compute() keeps this
+    // file Flutter-free.)
+    final json = await f.readAsString();
+    return Isolate.run(() => AlignmentMap.fromJsonString(json));
   }
 
   Future<String> writeAlignment(

@@ -104,8 +104,17 @@ struct AlignmentService {
         return map
     }
 
-    func loadAlignmentMap(for book: Book) -> AlignmentMap? {
+    /// Multi-MB JSON — resolve the URL on the main actor (SwiftData model
+    /// access), decode off it. Callers await; the reader used to decode this
+    /// on @MainActor at every book open.
+    func loadAlignmentMap(for book: Book) async -> AlignmentMap? {
         guard let url = book.resolvedAlignmentMapURL else { return nil }
+        return await Self.loadAlignmentMap(at: url)
+    }
+
+    /// Runs on the cooperative pool (nonisolated async), never the caller's
+    /// actor.
+    nonisolated static func loadAlignmentMap(at url: URL) async -> AlignmentMap? {
         guard let data = try? Data(contentsOf: url) else { return nil }
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
