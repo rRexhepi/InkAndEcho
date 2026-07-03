@@ -13,6 +13,7 @@ struct LibraryView: View {
     @State private var importing = false
     @State private var importError: String?
     @State private var showSettings = false
+    @State private var showSourceGuide = false
     @AppStorage("inkandecho.lastOpenedBookID") private var lastOpenedBookID: String = ""
     @AppStorage("inkandecho.hasCompletedOnboarding") private var hasCompletedOnboarding: Bool = false
 
@@ -45,8 +46,18 @@ struct LibraryView: View {
                 set: { if !$0 { importError = nil } }
             )) {
                 Button("OK", role: .cancel) { importError = nil }
+                // The DRM churn moment: a failed import is where users
+                // discover their store purchase isn't a file. Point at
+                // sources that are.
+                Button("Where to find books") {
+                    importError = nil
+                    showSourceGuide = true
+                }
             } message: {
                 Text(importError ?? "")
+            }
+            .sheet(isPresented: $showSourceGuide) {
+                SourceGuideView()
             }
             .fullScreenCover(isPresented: Binding(
                 get: { !hasCompletedOnboarding },

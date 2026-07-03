@@ -30,10 +30,12 @@
 		E2E3653DDE4DE2A61136804E /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = F3A872832608CF8CDE642DBB /* Assets.xcassets */; };
 		E30334F8FAF90446B2260AD8 /* AlignmentService.swift in Sources */ = {isa = PBXBuildFile; fileRef = AFF009345723E68F5306F679 /* AlignmentService.swift */; };
 		E94BC66FEAB13FE123A368C8 /* MigrationImporter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2072F1CE4A465B80C6DCA2D2 /* MigrationImporter.swift */; };
+		EF8C6F5F258452E57B32EE3C /* SourceGuideView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 016A11D605E9562005C66C88 /* SourceGuideView.swift */; };
 		F517A9E5763B8149575C6E5A /* PlatformImage.swift in Sources */ = {isa = PBXBuildFile; fileRef = 03A1AB50F8D3B4289C8EAEE6 /* PlatformImage.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
+		016A11D605E9562005C66C88 /* SourceGuideView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SourceGuideView.swift; sourceTree = "<group>"; };
 		03A1AB50F8D3B4289C8EAEE6 /* PlatformImage.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlatformImage.swift; sourceTree = "<group>"; };
 		12A7C200EA73136ABF2B9E9F /* BookFileResolution.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BookFileResolution.swift; sourceTree = "<group>"; };
 		1572B6E8AB476A5B2527608D /* AlignmentCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AlignmentCoordinator.swift; sourceTree = "<group>"; };
@@ -126,6 +128,7 @@
 				92C483244FFA8A3AF439FA53 /* ReaderView.swift */,
 				97774731905DC84D1F3E986B /* ReaderView+iOS.swift */,
 				F34FE67BFB0A6FB7ED30611D /* SettingsView.swift */,
+				016A11D605E9562005C66C88 /* SourceGuideView.swift */,
 				6795E880D72A9C9046D31CF3 /* Theme.swift */,
 			);
 			path = App;
@@ -237,6 +240,7 @@
 				B71DCBC65E976EFB410364FA /* ReaderView+iOS.swift in Sources */,
 				B56068FD4BE0B43660C64FDA /* ReaderView.swift in Sources */,
 				D041ECEF9633D7127E1F5650 /* SettingsView.swift in Sources */,
+				EF8C6F5F258452E57B32EE3C /* SourceGuideView.swift in Sources */,
 				A6E2A5C12483EA2C0C69D98F /* Theme.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;

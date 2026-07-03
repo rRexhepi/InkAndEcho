@@ -83,6 +83,7 @@ struct SettingsView: View {
     @AppStorage(AppSettings.defaultHighlightColorKey) private var defaultHighlightColorRaw: String = AnnotationColor.amber.rawValue
     @AppStorage(AppSettings.readAlongModeKey) private var readAlongModeRaw: String = AppSettings.initialReadAlongModeRaw()
     @AppStorage(AppSettings.backgroundAudioKey) private var backgroundAudioEnabled: Bool = false
+    @State private var showSourceGuide = false
 
     private var theme: Binding<ThemeChoice> {
         Binding(
@@ -150,6 +151,12 @@ struct SettingsView: View {
             }
 
             Section("Support") {
+                Button {
+                    showSourceGuide = true
+                } label: {
+                    Label("Where to find books & audiobooks", systemImage: "books.vertical")
+                }
+                .tint(Theme.accent)
                 Link(destination: URL(string: "https://github.com/rRexhepi/ink-and-echo-app/issues")!) {
                     Label("Report a problem", systemImage: "ladybug")
                 }
@@ -161,6 +168,9 @@ struct SettingsView: View {
             }
         }
         .formStyle(.grouped)
+        .sheet(isPresented: $showSourceGuide) {
+            SourceGuideView()
+        }
         #if os(macOS)
         .frame(width: 460, height: 220)
         #endif
