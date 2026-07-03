@@ -322,7 +322,8 @@ extension ReaderView {
                 onRequestExpand: nil,
                 chapterEndTime: { currentChapterEndSeconds() },
                 loadError: audioLoadErrorMessage,
-                onRetry: { retryAudioLoad() }
+                onRetry: { retryAudioLoad() },
+                onSentenceStep: denseWords.isEmpty ? nil : { seekToSentence(offset: $0) }
             )
         } else {
             attachAudiobookBar
@@ -635,7 +636,8 @@ extension ReaderView {
                 onRequestExpand: nil,
                 chapterEndTime: { currentChapterEndSeconds() },
                 loadError: audioLoadErrorMessage,
-                onRetry: { retryAudioLoad() }
+                onRetry: { retryAudioLoad() },
+                onSentenceStep: denseWords.isEmpty ? nil : { seekToSentence(offset: $0) }
             )
             .background(Color.clear)
             Spacer(minLength: 0)

@@ -1524,6 +1524,64 @@ struct ReaderView: View {
         followNarration()
     }
 
+    /// Chapter-global word range of the sentence containing `word`, via the
+    /// memoized word→paragraph tables plus the shared sentence scanner.
+    func sentenceBounds(containing word: Int, in segment: TextSegment) -> (start: Int, end: Int)? {
+        let layout = wordLayout(for: segment)
+        guard let paraIdx = layout.paragraphIndex(forWord: word),
+              let paraStart = layout.firstWord(ofParagraph: paraIdx) else { return nil }
+        let paras = paragraphs(of: segment.text)
+        guard paraIdx < paras.count else { return nil }
+        let local = word - paraStart
+        guard let s = sentenceWordRanges(in: paras[paraIdx])
+            .first(where: { local >= $0.start && local < $0.end }) else { return nil }
+        return (paraStart + s.start, paraStart + s.end)
+    }
+
+    /// The sentence being narrated right now: chapter + chapter-global word
+    /// range, from the same latency-compensated dense-word lookup the
+    /// highlight uses — so replay matches what's audible, not the engine's
+    /// rendered frontier. nil while unaligned, pre-roll, past a partial
+    /// frontier, or when another book is loaded.
+    func currentSentenceBounds() -> (segmentID: String, start: Int, end: Int)? {
+        guard !denseWords.isEmpty, audioIsThisBook else { return nil }
+        let t = max(0, engine.currentTime - engine.outputLatency * Double(engine.rate))
+        guard t >= denseWords[0].start else { return nil }
+        if let frontier = partialFrontier, t >= frontier { return nil }
+        let dw = denseWords[denseWordIndex(forTime: t)]
+        guard let segment = segments.first(where: { $0.id == dw.segmentId }),
+              let bounds = sentenceBounds(containing: dw.wordIndex, in: segment) else { return nil }
+        return (segment.id, bounds.start, bounds.end)
+    }
+
+    /// Replay the sentence being narrated (offset 0), or jump to the
+    /// previous (-1) / next (+1) one. The seek reuses the tap-to-play path
+    /// (dense per-word start, then play), so partial-map frontier handling
+    /// and the sparse fallback come along for free.
+    func seekToSentence(offset: Int) {
+        guard let current = currentSentenceBounds(),
+              let segment = segments.first(where: { $0.id == current.segmentID }) else { return }
+        let target: Int?
+        switch offset {
+        case ..<0:
+            // The sentence before this one; at the chapter top, replay the
+            // first. (Crossing back into the previous chapter is a page
+            // flip away — not worth the boundary bookkeeping here.)
+            target = current.start > 0
+                ? sentenceBounds(containing: current.start - 1, in: segment)?.start
+                : current.start
+        case 0:
+            target = current.start
+        default:
+            // The word at the exclusive end IS the next sentence's first
+            // word (paragraph starts are cumulative, so this holds across
+            // paragraph boundaries too); nil past the chapter tail.
+            target = sentenceBounds(containing: current.end, in: segment)?.start
+        }
+        guard let target else { return }
+        seekToWord(segmentID: segment.id, wordOffset: target, localIndex: 0)
+    }
+
     /// Narration end of the chapter being read (audio seconds) — the sleep
     /// timer's "End of chapter" target. Computed here because the alignment
     /// map is reader state. Prefers the narrated chapter (the active word

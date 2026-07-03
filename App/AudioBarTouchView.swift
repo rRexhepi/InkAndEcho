@@ -22,12 +22,16 @@ struct AudioBarTouchView: View {
     /// was a dead or disabled play button with no explanation.
     var loadError: String? = nil
     var onRetry: (() -> Void)? = nil
+    /// Sentence controls (dense-aligned books only): called with -1 / 0 / +1
+    /// for previous / replay / next sentence. nil hides the row — the
+    /// expanded bar is the only surface that renders it.
+    var onSentenceStep: ((Int) -> Void)? = nil
 
     /// Sleep timer state lives on the app-level coordinator so it survives
     /// popping the reader and fires from the lock screen.
     @Environment(AudioCoordinator.self) private var audio
 
-    private let rates: [Float] = [0.75, 1.0, 1.25, 1.5, 2.0]
+    private let rates: [Float] = [0.5, 0.75, 1.0, 1.25, 1.5, 2.0]
     private let sleepMinutes = [15, 30, 45, 60]
 
     /// Value-change triggers for `.sensoryFeedback`. Local counters (not
@@ -60,6 +64,11 @@ struct AudioBarTouchView: View {
                     .padding(.top, compact ? 6 : 12)
                     .padding(.bottom, compact ? 14 : 12)
                 if !compact {
+                    if let onSentenceStep {
+                        sentenceRow(step: onSentenceStep)
+                            .padding(.horizontal, 16)
+                            .padding(.bottom, 12)
+                    }
                     pillRow
                         .padding(.horizontal, 16)
                         .padding(.bottom, 16)
@@ -166,6 +175,39 @@ struct AudioBarTouchView: View {
                 .buttonStyle(.plain)
             }
         }
+    }
+
+    /// Sentence controls: previous / replay / next. Same 44 pt targets and
+    /// skip haptic as the ±15 s buttons — they're seeks, just word-precise.
+    private func sentenceRow(step: @escaping (Int) -> Void) -> some View {
+        HStack(spacing: 8) {
+            sentenceButton(symbol: "backward.frame", label: "Previous sentence") { step(-1) }
+            sentenceButton(symbol: "arrow.counterclockwise", label: "Replay sentence") { step(0) }
+            sentenceButton(symbol: "forward.frame", label: "Next sentence") { step(1) }
+            Text("Sentence")
+                .font(.system(size: 11, weight: .semibold))
+                .tracking(0.6)
+                .textCase(.uppercase)
+                .foregroundStyle(Theme.inkMuted)
+                .padding(.leading, 2)
+            Spacer(minLength: 0)
+        }
+    }
+
+    private func sentenceButton(symbol: String, label: String, action: @escaping () -> Void) -> some View {
+        Button {
+            action()
+            skipTapCount += 1
+        } label: {
+            Image(systemName: symbol)
+                .font(.system(size: 18, weight: .regular))
+                .foregroundStyle(Theme.inkSoft)
+                .frame(width: 44, height: 36)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .disabled(engine.duration <= 0)
+        .accessibilityLabel(label)
     }
 
     private func skipButton(seconds: TimeInterval, symbol: String) -> some View {
