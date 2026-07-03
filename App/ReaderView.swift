@@ -57,6 +57,10 @@ struct ReaderView: View {
     /// Transient reader notice (e.g. tapping a not-yet-synced word during a
     /// running alignment). Auto-clears; rendered in the banner slot.
     @State var seekNotice: String?
+    /// Non-nil right after an audiobook attaches: message of the
+    /// align-on-attach prompt (duration estimate + one-time model-download
+    /// mention), computed when the attach lands so both are current.
+    @State var alignPromptMessage: String?
 
     @State var noteAnchor: ParagraphAnchor?
     @State var noteEditingExisting: Annotation?
@@ -313,6 +317,18 @@ struct ReaderView: View {
             Text(parts.enumerated()
                 .map { "\($0.offset + 1). \($0.element.lastPathComponent)" }
                 .joined(separator: "\n"))
+        }
+        .alert("Sync the narration to the text?", isPresented: Binding(
+            get: { alignPromptMessage != nil },
+            set: { if !$0 { alignPromptMessage = nil } }
+        )) {
+            Button("Start syncing") {
+                alignPromptMessage = nil
+                runAlignment()
+            }
+            Button("Later", role: .cancel) { alignPromptMessage = nil }
+        } message: {
+            Text(alignPromptMessage ?? "")
         }
         .alert("Alignment failed", isPresented: Binding(
             get: { alignmentError != nil },
@@ -2340,12 +2356,28 @@ struct ReaderView: View {
                 // no-op since the bookID is unchanged).
                 audio.unload(ifBookID: book.id)
                 await audio.switchTo(book: book)
+                promptAlignAfterAttach()
             } catch is CancellationError {
                 // User cancelled the merge — nothing changed on disk.
             } catch {
                 attachError = error.localizedDescription
             }
         }
+    }
+
+    /// Offer alignment the moment audio attaches — read-along is the
+    /// flagship, and the old flow ended in silence until the user found
+    /// the Align pill on their own. First attach and Replace audiobook
+    /// both land here (everything routes through `attachAudio`). Skipped
+    /// while a job runs: starting another would only hit the busy toast.
+    private func promptAlignAfterAttach() {
+        guard !alignment.isRunning else { return }
+        let minutes = max(1, Int((book.totalDurationSeconds / WhisperAligner.realtimeFactor / 60).rounded()))
+        var message = "Read-along needs a one-time sync — about \(minutes) min for this audiobook. Keep the app open while it runs."
+        if !WhisperAligner.isModelDownloaded() {
+            message += " The first sync also downloads a ~150 MB model."
+        }
+        alignPromptMessage = message
     }
 }
 

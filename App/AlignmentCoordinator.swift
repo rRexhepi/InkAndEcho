@@ -13,6 +13,9 @@ import InkAndEchoCore
 @Observable
 final class AlignmentCoordinator {
     private(set) var currentBookID: UUID?
+    /// Title of the running job's book, for named busy copy when a second
+    /// book asks for the single alignment slot.
+    private(set) var currentBookTitle: String?
     private(set) var stage: AlignmentStage?
     private(set) var toast: String?
     private(set) var error: String?
@@ -48,11 +51,18 @@ final class AlignmentCoordinator {
     private var generation = 0
 
     func start(book: Book, modelContext: ModelContext) {
-        guard !isRunning else { return }
+        guard !isRunning else {
+            // One WhisperKit pipeline at a time. The old silent return read
+            // as a dead Align button from another book's reader — say why.
+            let running = currentBookTitle.map { "“\($0)”" } ?? "another book"
+            showToast("Still aligning \(running) — one book at a time. Cancel it from its reader to start this one.")
+            return
+        }
         let bookID = book.id
         generation += 1
         let myGeneration = generation
         currentBookID = bookID
+        currentBookTitle = book.title
         stage = .loadingModel(model: "preparing")
         error = nil
         partialMap = nil
@@ -92,12 +102,7 @@ final class AlignmentCoordinator {
                         self.stage = s
                     }
                 }
-                self.toast = Self.completionToast(for: map)
-                let snapshot = self.toast
-                Task { @MainActor [weak self] in
-                    try? await Task.sleep(nanoseconds: 4_000_000_000)
-                    if self?.toast == snapshot { self?.toast = nil }
-                }
+                self.showToast(Self.completionToast(for: map))
             } catch is CancellationError {
                 // Silent — the user explicitly aborted.
             } catch {
@@ -107,11 +112,21 @@ final class AlignmentCoordinator {
             }
             guard self.generation == myGeneration else { return }
             self.currentBookID = nil
+            self.currentBookTitle = nil
             self.stage = nil
             self.partialMap = nil
             self.partialCoveredThrough = 0
             self.lowMatchWarning = nil
             self.lastFinishedBookID = bookID
+        }
+    }
+
+    /// Set the toast with the shared 4 s auto-clear (a newer toast wins).
+    private func showToast(_ message: String) {
+        toast = message
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 4_000_000_000)
+            if self?.toast == message { self?.toast = nil }
         }
     }
 
@@ -139,6 +154,7 @@ final class AlignmentCoordinator {
         // no-op, then clear state here (the epilogue won't).
         generation += 1
         currentBookID = nil
+        currentBookTitle = nil
         stage = nil
         partialMap = nil
         partialCoveredThrough = 0

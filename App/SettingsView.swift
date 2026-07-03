@@ -51,13 +51,18 @@ enum AppSettings {
     /// Read-along mode: `ReadAlongMode` raw value (off / word / sentence).
     static let readAlongModeKey = "inkandecho.readAlongMode"
 
-    /// Default for every `readAlongModeKey` @AppStorage declaration: an
-    /// unset key falls back to the old bool (true → word), so upgrading
-    /// users keep their setting with no write-migration.
+    /// Default for every `readAlongModeKey` @AppStorage declaration.
+    /// Read-along ships ON (word mode) — the device live-test passed, and
+    /// onboarding already promises "the page follows the narrator", so a
+    /// default-off install contradicted the app's own pitch. The legacy
+    /// bool (build ≤ 14) still migrates when it was explicitly written:
+    /// an upgrader who turned the old toggle off stays off, no
+    /// write-migration either way.
     static func initialReadAlongModeRaw() -> String {
-        UserDefaults.standard.bool(forKey: wordHighlightingKey)
-            ? ReadAlongMode.word.rawValue
-            : ReadAlongMode.off.rawValue
+        guard let legacy = UserDefaults.standard.object(forKey: wordHighlightingKey) as? Bool else {
+            return ReadAlongMode.word.rawValue
+        }
+        return legacy ? ReadAlongMode.word.rawValue : ReadAlongMode.off.rawValue
     }
     /// Keep the current audiobook playing when you open a different book,
     /// instead of switching the shared engine to the new one.
@@ -84,6 +89,11 @@ struct SettingsView: View {
     @AppStorage(AppSettings.readAlongModeKey) private var readAlongModeRaw: String = AppSettings.initialReadAlongModeRaw()
     @AppStorage(AppSettings.backgroundAudioKey) private var backgroundAudioEnabled: Bool = false
     @State private var showSourceGuide = false
+    /// Model prefetch row state. `modelDownloaded` snapshots the on-disk
+    /// check once per Settings open (the row flips it on success).
+    @State private var modelDownloaded = WhisperAligner.isModelDownloaded()
+    @State private var modelDownloadProgress: Double?
+    @State private var modelDownloadError: String?
 
     private var theme: Binding<ThemeChoice> {
         Binding(
@@ -141,6 +151,18 @@ struct SettingsView: View {
                 Text("Word tints each spoken word; Sentence underlines the sentence being read. Needs an aligned audiobook.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
+
+                modelPrefetchRow
+                if !modelDownloaded {
+                    Text("Grab it now and your first book starts aligning without the download wait.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                if let modelDownloadError {
+                    Text(modelDownloadError)
+                        .font(.caption)
+                        .foregroundStyle(Theme.warning)
+                }
             }
 
             Section("Playback") {
@@ -174,6 +196,46 @@ struct SettingsView: View {
         #if os(macOS)
         .frame(width: 460, height: 220)
         #endif
+    }
+
+    /// One row, three states: downloaded / downloading (live progress) /
+    /// prefetch button. Same `WhisperAligner` download the aligner itself
+    /// runs, so a prefetched model is exactly what the first job finds.
+    @ViewBuilder
+    private var modelPrefetchRow: some View {
+        if modelDownloaded {
+            Label("Alignment model downloaded", systemImage: "checkmark.circle")
+                .foregroundStyle(.secondary)
+        } else if let progress = modelDownloadProgress {
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Downloading alignment model…")
+                ProgressView(value: progress)
+                    .tint(Theme.accent)
+            }
+        } else {
+            Button {
+                downloadModel()
+            } label: {
+                Label("Download alignment model (~150 MB)", systemImage: "arrow.down.circle")
+            }
+            .tint(Theme.accent)
+        }
+    }
+
+    private func downloadModel() {
+        modelDownloadError = nil
+        modelDownloadProgress = 0
+        Task {
+            do {
+                try await WhisperAligner.prefetchModel { fraction in
+                    Task { @MainActor in modelDownloadProgress = fraction }
+                }
+                modelDownloaded = true
+            } catch {
+                modelDownloadError = error.localizedDescription
+            }
+            modelDownloadProgress = nil
+        }
     }
 
     private var highlightColorRow: some View {

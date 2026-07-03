@@ -27,9 +27,35 @@ public struct WhisperAligner: AudioTextAligner {
     public let modelIdentifier: String
 
     /// `base.en`: ~16× realtime on Apple silicon via Core ML + ANE; meaningfully
-    /// better word recognition than tiny.en. Override for heavier models.
-    public init(modelIdentifier: String = "openai_whisper-base.en") {
+    /// better word recognition than tiny.en.
+    public static let defaultModel = "openai_whisper-base.en"
+
+    /// Override `modelIdentifier` for heavier models.
+    public init(modelIdentifier: String = WhisperAligner.defaultModel) {
         self.modelIdentifier = modelIdentifier
+    }
+
+    /// Transcription speed on Apple silicon (ANE), for "about N min"
+    /// estimates before a job starts.
+    public static let realtimeFactor: Double = 16
+
+    /// Whether the alignment model is already on disk — app surfaces use
+    /// this to warn about the one-time ~150 MB download before a job, and
+    /// to render the Settings prefetch row.
+    public static func isModelDownloaded(variant: String = defaultModel) -> Bool {
+        modelIsComplete(at: localModelFolder(variant: variant))
+    }
+
+    /// Fetch the model without running an alignment (the Settings prefetch
+    /// row), so the user's first real book aligns without the download wait.
+    /// No-op when the model is already local.
+    public static func prefetchModel(
+        variant: String = defaultModel,
+        progress: @Sendable @escaping (Double) -> Void
+    ) async throws {
+        _ = try await ensureModelOnDisk(variant: variant) { stage in
+            if case .downloadingModel(let fraction) = stage { progress(fraction) }
+        }
     }
 
     public func align(audioURL: URL, input: AlignmentInput) async throws -> AlignmentMap {
