@@ -34,6 +34,10 @@ enum AppSettings {
     /// re-applied by `AudioCoordinator.load` so a relaunch (fresh engine at
     /// 1×) resumes at the listener's speed. Same key on the Flutter build.
     static let playbackRateKey = "inkandecho.playbackRate"
+    /// Aa ladder step for the reading body (index into
+    /// `BodyTextMetrics.bodySizes`). Unset = `BodyTextMetrics.defaultStep`,
+    /// which snaps Dynamic Type's scaled 17 to the ladder.
+    static let typographyStepKey = "inkandecho.typographyStep"
 
     static func defaultHighlightColor() -> AnnotationColor {
         let raw = UserDefaults.standard.string(forKey: defaultHighlightColorKey) ?? AnnotationColor.amber.rawValue
@@ -67,6 +71,15 @@ struct SettingsView: View {
 
                 Toggle("Page-turn animations", isOn: $animationsEnabled)
                 Text("Turn off if you prefer instant page changes.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
+                HStack {
+                    Text("Text size")
+                    Spacer()
+                    TypographyStepper()
+                }
+                Text("Reading body size. Pages re-paginate and keep your place.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -127,6 +140,48 @@ struct SettingsView: View {
     // `applyTheme` pushes `overrideUserInterfaceStyle` to every window with
     // a cross-dissolve, live, the moment the picker changes. Programmatic
     // termination is also an App Review flag.
+}
+
+/// Shared Aa control: the reader-chrome popover and the Settings row render
+/// this same stepper, so the two surfaces can never drift. Writes the step
+/// index; `ReaderView` observes the key and re-paginates with a word-anchor
+/// remap so the reading position survives the size change.
+struct TypographyStepper: View {
+    @AppStorage(AppSettings.typographyStepKey) private var step: Int = BodyTextMetrics.defaultStep
+
+    private var clampedStep: Int {
+        min(max(0, step), BodyTextMetrics.bodySizes.count - 1)
+    }
+
+    var body: some View {
+        HStack(spacing: 10) {
+            stepButton(delta: -1, glyphSize: 14, label: "Smaller text")
+            Text("\(Int(BodyTextMetrics.bodySizes[clampedStep])) pt")
+                .font(.system(size: 12, design: .monospaced))
+                .foregroundStyle(Theme.inkMuted)
+                .monospacedDigit()
+                .frame(minWidth: 42)
+            stepButton(delta: +1, glyphSize: 21, label: "Larger text")
+        }
+    }
+
+    private func stepButton(delta: Int, glyphSize: CGFloat, label: String) -> some View {
+        let target = clampedStep + delta
+        return Button {
+            step = target
+        } label: {
+            Text("A")
+                .font(.system(size: glyphSize, design: .serif))
+                .foregroundStyle(Theme.ink)
+                .frame(width: 44, height: 36)
+                .background(Theme.canvasDeep.opacity(0.5))
+                .clipShape(Capsule())
+                .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
+        .disabled(!BodyTextMetrics.bodySizes.indices.contains(target))
+        .accessibilityLabel(label)
+    }
 }
 
 #if os(iOS)

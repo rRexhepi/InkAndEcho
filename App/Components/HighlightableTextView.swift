@@ -118,7 +118,7 @@ struct HighlightableTextView: UIViewRepresentable {
             let ns = NSMutableAttributedString(attributedString: NSAttributedString(s))
             let full = NSRange(location: 0, length: ns.length)
             let para = NSMutableParagraphStyle()
-            para.lineSpacing = 8
+            para.lineSpacing = BodyTextMetrics.lineSpacing
             ns.addAttribute(NSAttributedString.Key.paragraphStyle, value: para, range: full)
             // Font + ink go INTO the candidate string, not onto the view
             // after assignment. The old view-level `font =` / `textColor =`
@@ -128,7 +128,7 @@ struct HighlightableTextView: UIViewRepresentable {
             // per row per word tick that also killed any in-progress text
             // selection. (They're also why UIKit renders a color at all: the
             // bridged SwiftUI.ForegroundColor key means nothing to UITextView.)
-            ns.addAttribute(.font, value: Self.serifBody, range: full)
+            ns.addAttribute(.font, value: BodyTextMetrics.font, range: full)
             ns.addAttribute(.foregroundColor, value: UIColor(Theme.ink), range: full)
             // SwiftUI `Color` backgrounds don't survive `NSAttributedString(_:)`,
             // so per-word paint + read-along backgrounds are applied here as real
@@ -145,14 +145,6 @@ struct HighlightableTextView: UIViewRepresentable {
             }
             tintColor = UIColor(Theme.ink)
         }
-
-        private static let serifBody: UIFont = {
-            let base = UIFont.systemFont(ofSize: 17)
-            if let d = base.fontDescriptor.withDesign(.serif) {
-                return UIFont(descriptor: d, size: 17)
-            }
-            return base
-        }()
 
         override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
             guard let p = touches.first?.location(in: self) else {

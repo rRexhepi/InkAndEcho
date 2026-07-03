@@ -443,6 +443,12 @@ extension ReaderView {
                 .truncationMode(.middle)
                 .frame(maxWidth: .infinity)
             Spacer(minLength: 0)
+            phoneHeaderButton(icon: "textformat.size") { showTypographyPopover = true }
+                .popover(isPresented: $showTypographyPopover) {
+                    TypographyStepper()
+                        .padding(16)
+                        .presentationCompactAdaptation(.popover)
+                }
             Menu {
                 Button {
                     paginated.toggle()

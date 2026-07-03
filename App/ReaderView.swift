@@ -78,6 +78,10 @@ struct ReaderView: View {
     /// in the background instead of switching. See `AudioCoordinator`.
     @AppStorage(AppSettings.backgroundAudioKey) var backgroundAudioEnabled: Bool = false
     @AppStorage(AppSettings.animationsEnabledKey) var animationsEnabled: Bool = true
+    /// Aa ladder step. `BodyTextMetrics` reads the same key — this property
+    /// exists so the reader can observe changes and re-paginate.
+    @AppStorage(AppSettings.typographyStepKey) var typographyStep: Int = BodyTextMetrics.defaultStep
+    @State var showTypographyPopover = false
     @State var currentPageIndex: Int = 0
     @State var sidebarTab: SidebarTab = .chapters
     @FocusState var pageFocused: Bool
@@ -175,6 +179,13 @@ struct ReaderView: View {
     @State var paginationCache = PaginationCache()
 
     var body: some View {
+        applyAlertsAndSheets(to: readerEventLayer)
+    }
+
+    /// Layout plus the event/watcher half of the reader's modifier chain.
+    /// Alerts, sheets, and the toolbar apply in `applyAlertsAndSheets` —
+    /// the full chain in one expression exceeds the type-checker's budget.
+    private var readerEventLayer: some View {
         readerLayout
             .background(Theme.canvas)
             .navigationTitle(book.title)
@@ -231,6 +242,16 @@ struct ReaderView: View {
             guard finished == book.id else { return }
             reloadAlignmentAfterCompletion()
         }
+        .onChange(of: typographyStep) { _, _ in
+            // Capture the reading position under the OUTGOING typography:
+            // the layout cache still holds the old tables (wordLayout(for:)
+            // would rebuild them keyed to the new step). Then drop every
+            // pagination and recompute — the word-anchor remap in
+            // recomputeFlatPageBoundaries restores the page.
+            pendingAnchorWord = wordLayoutCache.startWord(ofPage: currentPageIndex)
+            paginationCache.invalidateAll()
+            recomputeFlatPageBoundaries(useSpread: flatBoundariesUseSpread)
+        }
         .onChange(of: alignment.partialRevision) { _, _ in
             // A partial map landed for the running job. Swap it in (only
             // when the job is THIS book's) so read-along and tap-to-play go
@@ -255,6 +276,12 @@ struct ReaderView: View {
         ) { result in
             handleAudioPicked(result)
         }
+    }
+
+    /// Alert / sheet / toolbar half of the reader's modifier chain (see
+    /// `readerEventLayer`).
+    private func applyAlertsAndSheets(to content: some View) -> some View {
+        content
         .alert("Audio attach failed", isPresented: Binding(
             get: { attachError != nil },
             set: { if !$0 { attachError = nil } }
@@ -324,6 +351,10 @@ struct ReaderView: View {
                 }
                 .help(paginated ? "Switch to scroll mode" : "Switch to paginated mode")
             }
+            // Aa (iPad / Catalyst chrome; the phone header has its own).
+            ToolbarItem(placement: .primaryAction) {
+                typographyButton
+            }
             ToolbarItem(placement: .primaryAction) {
                 Button {
                     showAnnotationsSheet = true
@@ -342,6 +373,22 @@ struct ReaderView: View {
                 },
                 onDismiss: { showAnnotationsSheet = false }
             )
+        }
+    }
+
+    /// Aa entry point: pops the shared `TypographyStepper`. One `@State`
+    /// backs both chrome placements (toolbar on iPad/Catalyst, phone
+    /// header) — only one is ever on screen.
+    var typographyButton: some View {
+        Button {
+            showTypographyPopover = true
+        } label: {
+            Label("Text size", systemImage: "textformat.size")
+        }
+        .popover(isPresented: $showTypographyPopover) {
+            TypographyStepper()
+                .padding(16)
+                .presentationCompactAdaptation(.popover)
         }
     }
 
@@ -983,14 +1030,23 @@ struct ReaderView: View {
         // always closes a chunk before SwiftUI clips with an ellipsis.
         // macOS shares the iPad single-page budget so a reader moving
         // between the two sees the same page breaks.
+        let base: Int
         if useSpread {
-            return 95
+            base = 95
+        } else {
+            #if os(iOS)
+            base = horizontalSizeClass == .compact ? 120 : 170
+            #else
+            base = 170
+            #endif
         }
-        #if os(iOS)
-        return horizontalSizeClass == .compact ? 120 : 170
-        #else
-        return 170
-        #endif
+        // The budgets above were tuned at the 17 pt default. Page capacity
+        // falls with the inverse square of the body size (fewer words per
+        // line AND fewer lines per page) — the spread path has no measured
+        // pagination, so it depends on this scaling to avoid clipping at
+        // large sizes.
+        let scale = pow(17.0 / Double(BodyTextMetrics.bodySize), 2)
+        return max(20, Int((Double(base) * scale).rounded()))
     }
 
     /// Stable integer signature of the current page-surface size, used to key
@@ -1050,9 +1106,13 @@ struct ReaderView: View {
     /// page count — route through here so they always agree, and results are
     /// memoized per chapter + geometry.
     func paginatedPages(for segment: TextSegment) -> [PageContent] {
+        // Both keys carry the Aa step: measured pagination depends on it via
+        // the metrics, and the word budget only via a lossy rounding — two
+        // steps could collide on the same budget.
+        let step = BodyTextMetrics.currentStep
         #if os(iOS)
         if !flatBoundariesUseSpread, let geometry = measuredPageGeometry() {
-            return paginationCache.pages(forKey: "m|\(segment.id)|\(pageAreaKey)") {
+            return paginationCache.pages(forKey: "m|\(segment.id)|\(pageAreaKey)|t\(step)") {
                 paginateByMeasuredHeight(
                     paragraphs: paragraphs(of: segment.text),
                     geometry: geometry,
@@ -1063,7 +1123,7 @@ struct ReaderView: View {
         }
         #endif
         let budget = flatBoundariesBudget > 0 ? flatBoundariesBudget : wordsBudget(useSpread: flatBoundariesUseSpread)
-        return paginationCache.pages(forKey: "w|\(segment.id)|\(budget)|\(flatBoundariesUseSpread)") {
+        return paginationCache.pages(forKey: "w|\(segment.id)|\(budget)|\(flatBoundariesUseSpread)|t\(step)") {
             pageBreaks(for: segment.text, wordsPerPage: budget)
         }
     }
@@ -1313,8 +1373,8 @@ struct ReaderView: View {
         let budget = flatBoundariesBudget > 0 ? flatBoundariesBudget : wordsBudget(useSpread: flatBoundariesUseSpread)
         // `pageAreaKey` is in the key so measured-mode page starts recompute
         // when the surface resizes (rotation / keyboard), not just on a budget
-        // change.
-        let key = "\(segment.id)|\(budget)|\(pageAreaKey)|\(segment.text.count)"
+        // change; the Aa step for the same reason as the pagination cache.
+        let key = "\(segment.id)|\(budget)|\(pageAreaKey)|\(segment.text.count)|t\(BodyTextMetrics.currentStep)"
         if wordLayoutCache.key != key {
             let paras = paragraphs(of: segment.text)
             var paragraphStarts: [Int] = []

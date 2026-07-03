@@ -176,23 +176,72 @@ func paginateByMeasuredHeight(
 // MARK: - TextKit measurer (matches HighlightableTextView exactly)
 
 #if canImport(UIKit)
-/// Body-text metrics shared between the rendered `HighlightableTextView` and
-/// the paginator's measurement. These MUST stay identical to the view's setup
-/// (serif 17, lineSpacing 8, zero container inset, zero fragment padding) or
-/// the measured break drifts from where the text actually wraps.
-enum BodyTextMetrics {
-    static let font: UIFont = {
-        let base = UIFont.systemFont(ofSize: 17)
-        if let descriptor = base.fontDescriptor.withDesign(.serif) {
-            return UIFont(descriptor: descriptor, size: 17)
-        }
-        return base
-    }()
+/// One rung of the Aa ladder: everything the body-text renderer and the
+/// paginator's measurer must agree on. Immutable — changing the size means
+/// swapping specs, so a pagination pass can never see mixed metrics.
+struct TypographySpec {
+    let bodySize: CGFloat
+    let lineSpacing: CGFloat
+    let font: UIFont
 
-    static let lineSpacing: CGFloat = 8
+    init(bodySize: CGFloat) {
+        self.bodySize = bodySize
+        // The shipped 17-on-25 rhythm (8 pt spacing at 17 pt, DESIGN.md
+        // body-reading's 1.65 leading) held proportional across the ladder.
+        self.lineSpacing = (bodySize * 8 / 17).rounded()
+        let base = UIFont.systemFont(ofSize: bodySize)
+        if let descriptor = base.fontDescriptor.withDesign(.serif) {
+            self.font = UIFont(descriptor: descriptor, size: bodySize)
+        } else {
+            self.font = base
+        }
+    }
+}
+
+/// Body-text metrics shared between the rendered `HighlightableTextView` and
+/// the paginator's measurement — the single source of truth for the reading
+/// face. Both read the same `spec` (persisted Aa step), so the measured break
+/// can't drift from where the text actually wraps.
+enum BodyTextMetrics {
+    /// Body sizes the Aa stepper walks. 17 is the DESIGN.md body-reading
+    /// default; the ladder is denser below it (fine control for small type)
+    /// and coarser above (large-print jumps).
+    static let bodySizes: [CGFloat] = [14, 15, 16, 17, 19, 21, 23, 25]
+
+    /// Step a fresh install starts at: Dynamic Type's scaled 17 snapped to
+    /// the ladder, so users with a large system text size start large
+    /// without hunting for the stepper.
+    static let defaultStep: Int = step(nearest: UIFontMetrics.default.scaledValue(for: 17))
+
+    static func step(nearest size: CGFloat) -> Int {
+        var best = 0
+        for (i, s) in bodySizes.enumerated() where abs(s - size) < abs(bodySizes[best] - size) {
+            best = i
+        }
+        return best
+    }
+
+    /// Persisted Aa step, clamped to the ladder. Missing key = `defaultStep`
+    /// (the `@AppStorage` declarations use the same fallback, so the two
+    /// reads always agree).
+    static var currentStep: Int {
+        let defaults = UserDefaults.standard
+        guard defaults.object(forKey: AppSettings.typographyStepKey) != nil else { return defaultStep }
+        return min(max(0, defaults.integer(forKey: AppSettings.typographyStepKey)), bodySizes.count - 1)
+    }
+
+    private static let specs: [TypographySpec] = bodySizes.map(TypographySpec.init)
+
+    static var spec: TypographySpec { specs[currentStep] }
+    static var font: UIFont { spec.font }
+    static var bodySize: CGFloat { spec.bodySize }
+    static var lineSpacing: CGFloat { spec.lineSpacing }
 
     /// One body line's vertical footprint, line spacing included.
-    static var lineUnit: CGFloat { ceil(font.lineHeight + lineSpacing) }
+    static var lineUnit: CGFloat {
+        let spec = spec
+        return ceil(spec.font.lineHeight + spec.lineSpacing)
+    }
 
     /// Rendered height of `text` wrapped to `width`, laid out with the same
     /// TextKit configuration `UITextView` uses inside `HighlightableTextView`
@@ -201,10 +250,11 @@ enum BodyTextMetrics {
     /// line-for-line.
     static func measuredHeight(_ text: String, width: CGFloat) -> CGFloat {
         guard width > 0 else { return 0 }
+        let spec = spec
         let style = NSMutableParagraphStyle()
-        style.lineSpacing = lineSpacing
+        style.lineSpacing = spec.lineSpacing
         let storage = NSTextStorage(string: text, attributes: [
-            .font: font,
+            .font: spec.font,
             .paragraphStyle: style,
         ])
         let container = NSTextContainer(size: CGSize(width: width, height: .greatestFiniteMagnitude))

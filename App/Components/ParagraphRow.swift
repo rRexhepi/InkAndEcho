@@ -18,8 +18,9 @@ enum HighlightMode {
 /// Layout: a 16pt margin column on the left (bookmark / note indicators),
 /// the selectable serif text in the middle, and a 22pt actions column on
 /// the right (`⋯` menu — highlight, bookmark, add note, play-from-here).
-/// The paragraph itself uses 17pt system serif at `lineSpacing(8)`, and
-/// gets a tinted background pill when a highlight annotation is attached.
+/// The paragraph renders at `BodyTextMetrics.spec` (system serif at the
+/// user's Aa step), and gets a tinted background pill when a highlight
+/// annotation is attached.
 struct ParagraphRow: View {
     let text: String
     let paragraphIndex: Int
