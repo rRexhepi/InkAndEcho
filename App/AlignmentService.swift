@@ -21,12 +21,14 @@ struct AlignmentService {
     /// `onPartial` receives interim maps while transcription runs (with the
     /// audio-seconds frontier they cover) so the reader can light up synced
     /// chapters mid-job. Partials are never written to disk — only the final
-    /// map lands in `alignment.json`.
+    /// map lands in `alignment.json`. Returns the final map so callers don't
+    /// re-decode the JSON they just watched being written.
+    @discardableResult
     func runAlignment(
         for book: Book,
         onPartial: @MainActor @escaping (AlignmentMap, Double) -> Void = { _, _ in },
         progress: @MainActor @escaping (AlignmentStage) -> Void = { _ in }
-    ) async throws {
+    ) async throws -> AlignmentMap {
         guard let ebookURL = book.resolvedEbookURL,
               let audioURL = book.resolvedAudiobookURL else {
             throw AlignmentServiceError.missingFiles
@@ -99,6 +101,7 @@ struct AlignmentService {
         book.alignmentMapURL = mapURL
         try modelContext.save()
         progress(.complete(wordsAligned: map.words.count, sentencesAligned: map.sentences.count))
+        return map
     }
 
     func loadAlignmentMap(for book: Book) -> AlignmentMap? {

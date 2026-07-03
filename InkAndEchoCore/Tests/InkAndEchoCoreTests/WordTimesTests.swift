@@ -140,6 +140,86 @@ struct WordTimesTests {
         #expect(full[0].wordIndices == [0, 1, 2, 3])
         #expect(full[1].wordIndices == [0, 1])
     }
+
+    /// Synthetic abridged narration: the audiobook skips a long passage, so
+    /// the bracketing matches imply an absurd pace across it. Interpolating
+    /// would smear the cut's ~2 s over 60 words; instead the run is omitted
+    /// so the highlight parks on the last narrated word and jumps the cut.
+    /// The chapter's matchedFraction records how little of it really matched.
+    @Test func abridgedCutIsOmittedNotInterpolated() throws {
+        let aligner = WhisperAligner()
+        var book: [BookWord] = []
+        var audio: [AudioWord] = []
+        var anchors: [(bookIdx: Int, audioIdx: Int)] = []
+        // 11 matched words at 1 s/word — a stable median pace.
+        for i in 0...10 {
+            book.append(bw("s1", i, "match\(i)"))
+            audio.append(aw("match\(i)", Double(i)))
+            anchors.append((bookIdx: i, audioIdx: i))
+        }
+        // 60 book words the narrator skipped (absent from the audio).
+        for i in 11...70 {
+            book.append(bw("s1", i, "cut\(i)"))
+        }
+        // Matched tail 2 s after the cut begins: implied pace 2/61 s/word.
+        for (offset, i) in (71...73).enumerated() {
+            book.append(bw("s1", i, "tail\(i)"))
+            audio.append(aw("tail\(i)", 12.0 + Double(offset)))
+            anchors.append((bookIdx: i, audioIdx: 11 + offset))
+        }
+
+        let result = aligner.computeWordTimes(bookWords: book, audio: audio, anchors: anchors)
+
+        #expect(result.count == 1)
+        let s = result[0]
+        #expect(s.wordIndices.contains(10))              // last narrated word before the cut
+        #expect(s.wordIndices.contains(71))              // first word after it
+        #expect(!s.wordIndices.contains(11))             // the cut run is absent…
+        #expect(!s.wordIndices.contains(40))
+        #expect(!s.wordIndices.contains(70))
+        #expect(s.wordIndices.count == 14)               // …entirely
+        for i in 1..<s.starts.count {                    // still strictly increasing
+            #expect(s.starts[i] > s.starts[i - 1])
+        }
+        // 14 matched of 74 words → rough chapter, well under the threshold.
+        let fraction = try #require(s.matchedFraction)
+        #expect(abs(fraction - 14.0 / 74.0) < 1e-9)
+
+        let map = AlignmentMap(
+            words: [], sentences: [], wordTimes: result,
+            createdAt: .now, modelIdentifier: "test"
+        )
+        #expect(map.roughSegmentIDs() == ["s1"])
+        let overall = try #require(map.overallMatchedFraction)
+        // Weighted by EMITTED words (the omitted run carries no entries).
+        #expect(abs(overall - 14.0 / 74.0) < 1e-9)
+    }
+
+    /// Short unmatched gaps keep interpolating — omission only fires on long
+    /// runs at implausible pace, so normal ASR misses are unaffected.
+    @Test func shortGapsStillInterpolate() {
+        let aligner = WhisperAligner()
+        var book: [BookWord] = []
+        var audio: [AudioWord] = []
+        var anchors: [(bookIdx: Int, audioIdx: Int)] = []
+        var bookIdx = 0
+        var t = 0.0
+        for block in 0..<5 {
+            book.append(bw("s1", bookIdx, "match\(block)"))
+            audio.append(aw("match\(block)", t))
+            anchors.append((bookIdx: bookIdx, audioIdx: block))
+            bookIdx += 1
+            // 3 unmatched words per gap — far under the run threshold.
+            for j in 0..<3 {
+                book.append(bw("s1", bookIdx, "miss\(block)-\(j)"))
+                bookIdx += 1
+            }
+            t += 4
+        }
+        let result = aligner.computeWordTimes(bookWords: book, audio: audio, anchors: anchors)
+        #expect(result.count == 1)
+        #expect(result[0].wordIndices.count == book.count)   // nothing omitted
+    }
 }
 
 /// The chunk-seam dedup: each 5-minute chunk loads 2 s past its boundary, so

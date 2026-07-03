@@ -58,6 +58,11 @@ public struct WhisperAligner: AudioTextAligner {
             return Double(file.length) / file.processingFormat.sampleRate
         }()
 
+        // Tokenized/normalized book words + frequency map, built ONCE — the
+        // chunk loop's partial emits and the low-match check would otherwise
+        // re-tokenize the whole book per chunk.
+        let book = BookIndex(segments: input.segments)
+
         // Transcript cache, checked BEFORE the WhisperKit init: a hit skips
         // the model load (and its one-time ~150 MB download) entirely, so a
         // re-align costs seconds.
@@ -65,7 +70,7 @@ public struct WhisperAligner: AudioTextAligner {
         let cacheKey = cache.key(forAudioAt: audioURL, model: modelIdentifier)
         if let cacheKey, let cached = cache.load(key: cacheKey) {
             progress(.aligning)
-            let map = alignWords(audio: cached, segments: input.segments)
+            let map = alignWords(audio: cached, book: book, segments: input.segments)
             progress(.complete(wordsAligned: map.words.count, sentencesAligned: map.sentences.count))
             return map
         }
@@ -210,13 +215,28 @@ public struct WhisperAligner: AudioTextAligner {
             // live after ~19 s), then every 3rd — each emit re-runs the
             // greedy matcher over the whole accumulated transcript. Skip the
             // final chunk; the full map lands right after the loop.
-            if let onPartial, !audioWords.isEmpty, loadCursor < totalAudioSeconds,
-               chunkIndex <= 3 || chunkIndex % 3 == 0 {
+            let emitPartial = onPartial != nil && loadCursor < totalAudioSeconds
+                && (chunkIndex <= 3 || chunkIndex % 3 == 0)
+            // Ten minutes in is enough signal to judge whether this is even
+            // the right audiobook: healthy narration lands well over one
+            // anchor per minute, a mismatched (or wrong-language, or
+            // wrong-edition) file lands near zero. Warn once — the pipe is
+            // one-way, so cancelling stays the user's call.
+            let checkMatchRate = chunkIndex == 2 && totalAudioSeconds > 0 && loadCursor > 0
+            if emitPartial || checkMatchRate, !audioWords.isEmpty {
                 let sorted = audioWords.sorted {
                     ($0.startSeconds, $0.endSeconds) < ($1.startSeconds, $1.endSeconds)
                 }
-                let partial = alignWords(audio: sorted, segments: input.segments, truncateTail: true)
-                onPartial(partial, loadCursor)
+                let partial = alignWords(audio: sorted, book: book, segments: input.segments, truncateTail: true)
+                if checkMatchRate {
+                    let perMinute = Double(partial.words.count) / (loadCursor / 60)
+                    if perMinute < Self.minHealthyAnchorsPerMinute {
+                        progress(.lowMatchWarning(anchorsPerMinute: perMinute))
+                    }
+                }
+                if emitPartial {
+                    onPartial?(partial, loadCursor)
+                }
             }
         }
 
@@ -231,33 +251,24 @@ public struct WhisperAligner: AudioTextAligner {
 
         progress(.aligning)
 
-        let map = alignWords(audio: audioWords, segments: input.segments)
+        let map = alignWords(audio: audioWords, book: book, segments: input.segments)
         progress(.complete(wordsAligned: map.words.count, sentencesAligned: map.sentences.count))
         return map
     }
+
+    /// Anchors-per-minute below which the transcript almost certainly isn't
+    /// this book's narration. Healthy alignments land far above it.
+    static let minHealthyAnchorsPerMinute: Double = 1.0
 
     // MARK: - Greedy alignment
 
     private func alignWords(
         audio: [AudioWord],
+        book: BookIndex,
         segments: [TextSegment],
         truncateTail: Bool = false
     ) -> AlignmentMap {
-        // Flatten book words with their (segmentId, segmentLocalIndex) labels.
-        // Local index here matches the wordIndex the reader's UI looks up.
-        var bookWords: [BookWord] = []
-        for segment in segments {
-            let tokens = tokenizeWords(segment.text)
-            for (idx, raw) in tokens.enumerated() {
-                let norm = normalizeWord(raw)
-                guard !norm.isEmpty else { continue }
-                bookWords.append(BookWord(
-                    segmentId: segment.id,
-                    indexInSegment: idx,
-                    normalized: norm
-                ))
-            }
-        }
+        let bookWords = book.words
         guard !bookWords.isEmpty, !audio.isEmpty else {
             return emptyMap()
         }
@@ -265,8 +276,6 @@ public struct WhisperAligner: AudioTextAligner {
         // Frequency maps drive anchor selection. We want words that are rare in
         // BOTH sequences (so they're distinctive landmarks) and identical when
         // normalized.
-        var bookFreq: [String: Int] = [:]
-        for w in bookWords { bookFreq[w.normalized, default: 0] += 1 }
         var audioFreq: [String: Int] = [:]
         for w in audio { audioFreq[w.text, default: 0] += 1 }
 
@@ -274,7 +283,7 @@ public struct WhisperAligner: AudioTextAligner {
         let anchors = findAnchorPairs(
             bookWords: bookWords,
             audio: audio,
-            bookFreq: bookFreq,
+            bookFreq: book.freq,
             audioFreq: audioFreq
         )
 
@@ -565,30 +574,75 @@ public struct WhisperAligner: AudioTextAligner {
             }
         }
 
+        // Cut detection (abridged narrations, skipped passages): a long run
+        // of unmatched book words whose bracketing matches imply an absurd
+        // pace isn't being narrated slowly — it isn't being narrated at all.
+        // Interpolating would smear the cut's few audio seconds over hundreds
+        // of words. Omit such runs from the parallel arrays instead: the
+        // reader's largest-below binary searches (`denseStart`,
+        // `denseWordIndex`) park the highlight on the last narrated word and
+        // jump the cut — zero schema or reader changes, unlike a sentinel.
+        var omitted = [Bool](repeating: false, count: n)
+        var paces: [Double] = []   // seconds per book word between matched neighbours
+        for k in 0..<(knownIdx.count - 1) {
+            let a = knownIdx[k], b = knownIdx[k + 1]
+            paces.append((known[b]! - known[a]!) / Double(b - a))
+        }
+        if paces.count >= 3 {
+            let median = paces.sorted()[paces.count / 2]
+            if median > 0 {
+                for k in 0..<(knownIdx.count - 1)
+                where knownIdx[k + 1] - knownIdx[k] - 1 > Self.cutRunWords {
+                    let pace = paces[k]
+                    if pace < median / 3 || pace > median * 3 {
+                        for i in (knownIdx[k] + 1)..<knownIdx[k + 1] { omitted[i] = true }
+                    }
+                }
+            }
+        }
+
         // Group into per-segment parallel arrays (book words are contiguous by
-        // segment, in reading order).
+        // segment, in reading order). `matchedFraction` records how much of
+        // each chapter got REAL transcript times vs interpolation/omission —
+        // the aligner's own per-chapter confidence.
         var result: [SegmentWordTimes] = []
         var curSeg: String?
         var idxs: [Int] = []
         var starts: [Double] = []
+        var segMatched = 0
+        var segTotal = 0
+        func flushSegment() {
+            guard let s = curSeg, !idxs.isEmpty else { return }
+            result.append(SegmentWordTimes(
+                segmentId: s,
+                wordIndices: idxs,
+                starts: starts,
+                matchedFraction: segTotal > 0 ? Double(segMatched) / Double(segTotal) : 0
+            ))
+        }
         for i in 0..<emitCount {
             let bw = bookWords[i]
             if bw.segmentId != curSeg {
-                if let s = curSeg {
-                    result.append(SegmentWordTimes(segmentId: s, wordIndices: idxs, starts: starts))
-                }
+                flushSegment()
                 curSeg = bw.segmentId
                 idxs = []
                 starts = []
+                segMatched = 0
+                segTotal = 0
             }
+            segTotal += 1
+            if known[i] != nil { segMatched += 1 }
+            guard !omitted[i] else { continue }
             idxs.append(bw.indexInSegment)
             starts.append(times[i])
         }
-        if let s = curSeg {
-            result.append(SegmentWordTimes(segmentId: s, wordIndices: idxs, starts: starts))
-        }
+        flushSegment()
         return result
     }
+
+    /// Unmatched runs longer than this are candidates for cut omission when
+    /// their implied pace diverges >3× from the median matched pace.
+    static let cutRunWords = 50
 
     private func emptyMap() -> AlignmentMap {
         AlignmentMap(
@@ -650,11 +704,18 @@ public enum AlignmentStage: Sendable {
     case transcribing(snippet: String?, fraction: Double?, etaSeconds: TimeInterval?)
     case aligning
     case complete(wordsAligned: Int, sentencesAligned: Int)
+    /// Diagnostic, not a pipeline phase: emitted once, early in the run, when
+    /// the transcript is matching the book text suspiciously poorly (likely
+    /// the wrong audiobook). Consumers should surface it persistently instead
+    /// of letting the next `.transcribing` overwrite it.
+    case lowMatchWarning(anchorsPerMinute: Double)
 
     public var displayText: String {
         switch self {
         case .downloadingModel:
             return "Downloading alignment model (one-time)…"
+        case .lowMatchWarning:
+            return "Very few matches so far — is this the right audiobook for this book?"
         case .loadingModel(let model):
             return "Loading Whisper model (\(model))…"
         case .transcribing(let snippet, _, let eta):
@@ -679,6 +740,7 @@ public enum AlignmentStage: Sendable {
         case .transcribing(_, let fraction, _): return fraction
         case .aligning: return 0.95
         case .complete: return 1.0
+        case .lowMatchWarning: return nil
         }
     }
 }
@@ -711,6 +773,35 @@ struct BookWord: Sendable {
     let segmentId: String
     let indexInSegment: Int
     let normalized: String
+}
+
+/// The book side of alignment, tokenized and normalized once. Flattened
+/// words carry (segmentId, segmentLocalIndex) labels — the local index
+/// matches the wordIndex the reader's UI looks up. The frequency map
+/// drives anchor rarity selection.
+struct BookIndex: Sendable {
+    let words: [BookWord]
+    let freq: [String: Int]
+
+    init(segments: [TextSegment]) {
+        var words: [BookWord] = []
+        for segment in segments {
+            let tokens = tokenizeWords(segment.text)
+            for (idx, raw) in tokens.enumerated() {
+                let norm = normalizeWord(raw)
+                guard !norm.isEmpty else { continue }
+                words.append(BookWord(
+                    segmentId: segment.id,
+                    indexInSegment: idx,
+                    normalized: norm
+                ))
+            }
+        }
+        var freq: [String: Int] = [:]
+        for w in words { freq[w.normalized, default: 0] += 1 }
+        self.words = words
+        self.freq = freq
+    }
 }
 
 private struct WordIndexRange {

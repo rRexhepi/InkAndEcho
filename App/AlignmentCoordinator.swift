@@ -28,6 +28,11 @@ final class AlignmentCoordinator {
     private(set) var partialMap: AlignmentMap?
     private(set) var partialCoveredThrough: Double = 0
     private(set) var partialRevision = 0
+    /// Anchors-per-minute measured a couple of chunks in, when suspiciously
+    /// low (likely the wrong audiobook for this book). Persistent for the
+    /// rest of the job — the stage pipe is one-way, so the existing cancel
+    /// affordances are the escape hatch, not a blocking dialog.
+    private(set) var lowMatchWarning: Double?
 
     var isRunning: Bool { currentBookID != nil }
 
@@ -52,6 +57,7 @@ final class AlignmentCoordinator {
         error = nil
         partialMap = nil
         partialCoveredThrough = 0
+        lowMatchWarning = nil
         // Re-arm the completion signal: it's only consumed via onChange, so
         // re-aligning the same book in one session would otherwise write the
         // same value over itself and never fire the reader's reload.
@@ -67,19 +73,22 @@ final class AlignmentCoordinator {
             guard let self, self.generation == myGeneration else { return }
             let service = AlignmentService(modelContext: modelContext)
             do {
-                try await service.runAlignment(for: book, onPartial: { [weak self] map, coveredThrough in
+                let map = try await service.runAlignment(for: book, onPartial: { [weak self] map, coveredThrough in
                     guard let self, self.generation == myGeneration else { return }
                     self.partialMap = map
                     self.partialCoveredThrough = coveredThrough
                     self.partialRevision += 1
                 }) { [weak self] s in
                     guard let self, self.generation == myGeneration else { return }
-                    self.stage = s
+                    // Diagnostics ride the same pipe as phases but must
+                    // persist — the next .transcribing would overwrite them.
+                    if case .lowMatchWarning(let perMinute) = s {
+                        self.lowMatchWarning = perMinute
+                    } else {
+                        self.stage = s
+                    }
                 }
-                let count = service.loadAlignmentMap(for: book)?.words.count ?? 0
-                self.toast = count == 0
-                    ? "Alignment finished but no anchors landed. The audiobook may not match this EPUB."
-                    : "Alignment complete · \(count) paragraph anchors synced"
+                self.toast = Self.completionToast(for: map)
                 let snapshot = self.toast
                 Task { @MainActor [weak self] in
                     try? await Task.sleep(nanoseconds: 4_000_000_000)
@@ -97,8 +106,25 @@ final class AlignmentCoordinator {
             self.stage = nil
             self.partialMap = nil
             self.partialCoveredThrough = 0
+            self.lowMatchWarning = nil
             self.lastFinishedBookID = bookID
         }
+    }
+
+    /// "Synced N% · K rough chapters" when the map carries per-chapter
+    /// confidence and any chapter fell under the rough threshold; the
+    /// familiar anchor-count line otherwise.
+    private static func completionToast(for map: AlignmentMap) -> String {
+        let count = map.words.count
+        guard count > 0 else {
+            return "Alignment finished but no anchors landed. The audiobook may not match this EPUB."
+        }
+        let rough = map.roughSegmentIDs().count
+        if rough > 0, let fraction = map.overallMatchedFraction {
+            let pct = Int((fraction * 100).rounded())
+            return "Alignment complete · synced ~\(pct)% · \(rough) rough chapter\(rough == 1 ? "" : "s") won't word-highlight"
+        }
+        return "Alignment complete · \(count) paragraph anchors synced"
     }
 
     func cancel() {
@@ -112,6 +138,7 @@ final class AlignmentCoordinator {
         stage = nil
         partialMap = nil
         partialCoveredThrough = 0
+        lowMatchWarning = nil
     }
 
     func dismissError() { error = nil }

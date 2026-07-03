@@ -129,6 +129,10 @@ struct ReaderView: View {
     /// Every book word with its narration start time, flattened across all
     /// chapters and time-sorted. The read-along highlight binary-searches this.
     @State var denseWords: [DenseWord] = []
+    /// Chapters whose matched fraction fell under the rough threshold:
+    /// word highlighting is disabled there (honest no-highlight beats
+    /// confidently wrong) and the chapter drawer shows a warning dot.
+    @State var roughSegments: Set<String> = []
     /// Memoized word→paragraph / word→page tables for the current chapter and
     /// pagination budget. A plain class held in `@State` on purpose: refreshing
     /// it is invisible to SwiftUI (it's a derived cache, not view state), so it
@@ -675,6 +679,12 @@ struct ReaderView: View {
                     .foregroundStyle(isSelected ? Theme.ink : Theme.inkSoft)
                     .lineLimit(2)
                     .frame(maxWidth: .infinity, alignment: .leading)
+                if roughSegments.contains(segment.id) {
+                    Circle()
+                        .fill(Theme.warning)
+                        .frame(width: 6, height: 6)
+                        .accessibilityLabel("Rough audio sync in this chapter")
+                }
             }
             .padding(.horizontal, 8)
             .padding(.vertical, 9)
@@ -1089,7 +1099,9 @@ struct ReaderView: View {
             seekEnabled: alignmentMap != nil,
             segmentID: segmentID,
             activeWordTracker: activeWordTracker,
-            highlightMode: wordHighlightingEnabled ? .word : .none,
+            // Rough chapters (matched fraction under the threshold) render
+            // no word highlight — the times there are mostly interpolation.
+            highlightMode: wordHighlightingEnabled && !roughSegments.contains(segmentID) ? .word : .none,
             annotations: annotations(forSegment: segmentID, paragraph: paragraphIndex),
             onPlayFromWord: { localWordIdx in
                 seekToWord(segmentID: segmentID, wordOffset: wordOffset, localIndex: localWordIdx)
@@ -1604,6 +1616,16 @@ struct ReaderView: View {
                     .font(.caption)
                     .foregroundStyle(Theme.inkMuted)
             }
+            if alignment.lowMatchWarning != nil {
+                HStack(spacing: 6) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .font(.caption)
+                        .foregroundStyle(Theme.warning)
+                    Text("Very few matches so far — check that this audiobook matches the book. Cancel if it's the wrong narration.")
+                        .font(.caption)
+                        .foregroundStyle(Theme.inkSoft)
+                }
+            }
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 10)
@@ -2044,8 +2066,10 @@ struct ReaderView: View {
             anchorsBySegment = [:]
             anchorsBySegmentAudioIdx = [:]
             denseWords = []
+            roughSegments = []
             return
         }
+        roughSegments = map.roughSegmentIDs()
         var byStart: [String: [WordAnchor]] = [:]
         var byAudio: [String: [WordAnchor]] = [:]
         for anchor in map.words {

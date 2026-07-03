@@ -136,10 +136,54 @@ public struct SegmentWordTimes: Codable, Sendable, Hashable {
     public let segmentId: String
     public let wordIndices: [Int]
     public let starts: [Double]
+    /// Fraction of this chapter's words that matched REAL transcript words
+    /// (the rest were interpolated or omitted) — the aligner's per-chapter
+    /// confidence. nil on maps written before the field existed; treat as
+    /// trustworthy (decode-with-default, same pattern as `AlignmentMap`).
+    public let matchedFraction: Double?
 
-    public init(segmentId: String, wordIndices: [Int], starts: [Double]) {
+    public init(segmentId: String, wordIndices: [Int], starts: [Double], matchedFraction: Double? = nil) {
         self.segmentId = segmentId
         self.wordIndices = wordIndices
         self.starts = starts
+        self.matchedFraction = matchedFraction
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case segmentId, wordIndices, starts, matchedFraction
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.segmentId = try c.decode(String.self, forKey: .segmentId)
+        self.wordIndices = try c.decode([Int].self, forKey: .wordIndices)
+        self.starts = try c.decode([Double].self, forKey: .starts)
+        self.matchedFraction = try? c.decode(Double.self, forKey: .matchedFraction)
+    }
+}
+
+public extension AlignmentMap {
+    /// Below this matched fraction a chapter's word times are more likely to
+    /// mislead than help — surface a warning and disable word highlighting.
+    static let roughMatchThreshold = 0.5
+
+    /// Chapters whose matched fraction falls under `threshold`. Pre-confidence
+    /// maps (nil fractions) report none.
+    func roughSegmentIDs(threshold: Double = roughMatchThreshold) -> Set<String> {
+        Set(wordTimes.filter { ($0.matchedFraction ?? 1) < threshold }.map(\.segmentId))
+    }
+
+    /// Word-count-weighted matched fraction across all chapters; nil when no
+    /// chapter carries confidence data (pre-confidence maps).
+    var overallMatchedFraction: Double? {
+        var weighted = 0.0
+        var total = 0
+        for swt in wordTimes {
+            guard let fraction = swt.matchedFraction else { continue }
+            weighted += fraction * Double(swt.wordIndices.count)
+            total += swt.wordIndices.count
+        }
+        guard total > 0 else { return nil }
+        return weighted / Double(total)
     }
 }

@@ -38,6 +38,9 @@ enum Theme {
     static let onAccent       = adaptive(light: (251, 247, 238), dark: ( 27,  24,  21))
 
     static let highlightWordSoft = adaptive(light: (250, 221, 138), dark: (120, 100,  62))
+
+    /// DESIGN.md `semantic-warning` (#C7973F) — same hue as annot-amber.
+    static let warning        = adaptive(light: (199, 151,  63), dark: (199, 151,  63))
 }
 
 private func adaptive(light: (Int, Int, Int), dark: (Int, Int, Int)) -> Color {
