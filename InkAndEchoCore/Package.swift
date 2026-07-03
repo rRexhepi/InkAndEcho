@@ -22,6 +22,10 @@ let package = Package(
                 .product(name: "WhisperKit", package: "WhisperKit"),
             ]
         ),
-        .testTarget(name: "InkAndEchoCoreTests", dependencies: ["InkAndEchoCore"]),
+        .testTarget(
+            name: "InkAndEchoCoreTests",
+            dependencies: ["InkAndEchoCore"],
+            resources: [.copy("Resources")]
+        ),
     ]
 )

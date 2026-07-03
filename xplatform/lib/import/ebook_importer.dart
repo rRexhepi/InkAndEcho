@@ -15,11 +15,16 @@ class ImportedBook {
   final Uint8List? coverImageData;
   final List<TextSegment> segments;
 
+  /// Non-fatal import problems (unreadable spine entries, dangling spine
+  /// refs). The import succeeded; these explain any missing chapters.
+  final List<String> warnings;
+
   const ImportedBook({
     required this.title,
     required this.author,
     this.coverImageData,
     required this.segments,
+    this.warnings = const [],
   });
 }
 
@@ -57,7 +62,14 @@ class EPUBImporter implements EBookImporter {
     final opfDir = _dirname(opfPath);
 
     final tocEntries = _loadToc(archive, opf, opfDir);
-    final segments = _buildSegments(archive, opf, opfDir, tocEntries);
+    final warnings = <String>[];
+    final segments = _buildSegments(archive, opf, opfDir, tocEntries, warnings);
+    if (segments.isEmpty) {
+      final detail = warnings.isEmpty
+          ? 'No readable text in any spine entry.'
+          : 'No readable text. ${warnings.join('. ')}';
+      throw ImporterError(detail);
+    }
     final cover = _extractCover(archive, opf, opfDir);
 
     return ImportedBook(
@@ -65,6 +77,7 @@ class EPUBImporter implements EBookImporter {
       author: opf.author,
       coverImageData: cover,
       segments: segments,
+      warnings: warnings,
     );
   }
 
@@ -90,14 +103,21 @@ class EPUBImporter implements EBookImporter {
     _OPFData opf,
     String opfDir,
     List<_TocEntry> tocEntries,
+    List<String> warnings,
   ) {
     final segments = <TextSegment>[];
     for (final itemref in opf.spine) {
       final item = opf.manifest[itemref];
-      if (item == null) continue;
+      if (item == null) {
+        warnings.add("Spine item '$itemref' has no manifest entry");
+        continue;
+      }
       final path = _resolvePath(item.href, opfDir);
-      final xhtml = _extractTextOrNull(archive, path) ?? '';
-      if (xhtml.isEmpty) continue;
+      final xhtml = _extractTextOrNull(archive, path);
+      if (xhtml == null) {
+        warnings.add('Unreadable spine entry: $path');
+        continue;
+      }
       _appendSpineSegments(
         segments: segments,
         itemref: itemref,
@@ -138,9 +158,22 @@ String? _extractTextOrNull(Archive archive, String path) {
 }
 
 Uint8List _extractData(Archive archive, String path) {
-  final entry = archive.findFile(path);
+  final entry = _findEntry(archive, path);
   if (entry == null) throw ImporterError('Missing entry: $path');
   return entry.content;
+}
+
+/// Raw path first, then a rescan comparing canonical forms — zip entries
+/// whose names stayed percent-encoded (or carry `./` prefixes) still resolve
+/// against the already-normalized hrefs.
+ArchiveFile? _findEntry(Archive archive, String path) {
+  final exact = archive.findFile(path);
+  if (exact != null) return exact;
+  final want = normalizeHref(path);
+  for (final file in archive.files) {
+    if (normalizeHref(file.name) == want) return file;
+  }
+  return null;
 }
 
 Uint8List? _extractDataOrNull(Archive archive, String path) {
@@ -152,7 +185,34 @@ Uint8List? _extractDataOrNull(Archive archive, String path) {
 }
 
 String _resolvePath(String relative, String base) =>
-    base.isEmpty ? relative : '$base/$relative';
+    collapsePathSegments(base.isEmpty ? relative : '$base/$relative');
+
+/// Canonical form of an intra-EPUB href: percent-escapes decoded (kept raw
+/// when decoding fails, so the odd literal `%` survives) and `.` / `..`
+/// segments collapsed. Applied at parse time so both the archive lookup and
+/// TOC↔spine href equality see one spelling.
+String normalizeHref(String raw) {
+  String decoded;
+  try {
+    decoded = Uri.decodeFull(raw);
+  } catch (_) {
+    decoded = raw;
+  }
+  return collapsePathSegments(decoded);
+}
+
+String collapsePathSegments(String path) {
+  final out = <String>[];
+  for (final segment in path.split('/')) {
+    if (segment.isEmpty || segment == '.') continue;
+    if (segment == '..' && out.isNotEmpty && out.last != '..') {
+      out.removeLast();
+    } else {
+      out.add(segment);
+    }
+  }
+  return out.join('/');
+}
 
 String _dirname(String path) {
   final i = path.lastIndexOf('/');
@@ -246,7 +306,7 @@ _OPFData _parseOPF(String xml) {
         final properties = el.getAttribute('properties') ?? '';
         manifest[id] = _ManifestItem(
           id: id,
-          href: href,
+          href: normalizeHref(href),
           mediaType: el.getAttribute('media-type') ?? '',
           properties: properties,
         );
@@ -255,8 +315,11 @@ _OPFData _parseOPF(String xml) {
         }
         break;
       case 'itemref':
+        // Dedupe (Swift parity): a malformed spine listing the same idref
+        // twice would produce duplicate TextSegment ids, and everything
+        // keyed on segment id downstream assumes uniqueness.
         final idref = el.getAttribute('idref');
-        if (idref != null) spine.add(idref);
+        if (idref != null && !spine.contains(idref)) spine.add(idref);
         break;
       case 'meta':
         final name = el.getAttribute('name');
@@ -328,9 +391,14 @@ void _appendSpineSegments({
   if (splits.isEmpty) {
     final plain = stripHTML(xhtml);
     if (plain.isEmpty) return;
+    final hrefKey = _splitHref(itemHref).href;
+    final tocTitle = tocEntries
+        .where((e) => e.href == hrefKey && e.fragment == null)
+        .map((e) => e.title)
+        .firstOrNull;
     segments.add(TextSegment(
       id: itemref,
-      title: _extractChapterTitle(xhtml),
+      title: tocTitle ?? _extractChapterTitle(xhtml),
       text: plain,
     ));
     return;
@@ -373,7 +441,7 @@ class _Split {
 
 List<_Split> _collectSplits(
     String itemHref, String xhtml, List<_TocEntry> tocEntries) {
-  final hrefKey = itemHref.split('#').first;
+  final hrefKey = _splitHref(itemHref).href;
   final splits = <_Split>[];
   final seen = <int>{};
   for (final e in tocEntries) {
@@ -447,11 +515,14 @@ class _TocEntry {
   const _TocEntry({required this.href, this.fragment, required this.title});
 }
 
+/// Href part comes back canonical (`normalizeHref`) so TOC entries compare
+/// equal to already-normalized manifest hrefs; the fragment stays raw — it
+/// keys `_findAnchorOffset`'s `id="…"` match and downstream segment ids.
 ({String href, String? fragment}) _splitHref(String raw) {
   final i = raw.indexOf('#');
-  if (i < 0) return (href: raw, fragment: null);
+  if (i < 0) return (href: normalizeHref(raw), fragment: null);
   return (
-    href: raw.substring(0, i),
+    href: normalizeHref(raw.substring(0, i)),
     fragment: i + 1 < raw.length ? raw.substring(i + 1) : null,
   );
 }
@@ -554,16 +625,24 @@ String? _extractChapterTitle(String xhtml) {
 
 // MARK: - HTML stripping
 
+final _headRe = RegExp(r'<head[^>]*>[\s\S]*?</head>', caseSensitive: false);
 final _scriptRe = RegExp(r'<script[^>]*>[\s\S]*?</script>', caseSensitive: false);
 final _styleRe = RegExp(r'<style[^>]*>[\s\S]*?</style>', caseSensitive: false);
 final _tagRe = RegExp(r'<[^>]+>');
-final _numericEntityRe = RegExp(r'&#\d+;');
+final _numericEntityRe = RegExp(r'&#([xX][0-9a-fA-F]+|\d+);');
 final _spacesTabsRe = RegExp(r'[ \t]+');
 final _newlineSpaceRe = RegExp(r'\n[ \t]+');
 final _multiNewlineRe = RegExp(r'\n{3,}');
 
 String stripHTML(String html) {
-  var text = html.replaceAll(_scriptRe, '').replaceAll(_styleRe, '');
+  // Drop non-content blocks entirely. <head> matters as much as
+  // script/style: its <title> text survived tag-stripping and prepended
+  // itself to every chapter — "Chapter ThreeChapter Three" at the top of
+  // any chapter whose file titles itself (which is most real EPUBs).
+  var text = html
+      .replaceAll(_headRe, '')
+      .replaceAll(_scriptRe, '')
+      .replaceAll(_styleRe, '');
 
   const blockEnds = [
     '</p>', '</div>', '</h1>', '</h2>', '</h3>',
@@ -595,7 +674,11 @@ String stripHTML(String html) {
     '&rsquo;': '’',
   };
   entities.forEach((k, v) => text = text.replaceAll(k, v));
-  text = text.replaceAll(_numericEntityRe, '');
+  // Numeric entities (&#N; and &#xN;) — decoded, not stripped. Stripping
+  // turned "don&#8217;t" into "dont", which also dropped every contraction
+  // out of the aligner's anchor matching. Runs after the named table so
+  // "&#38;amp;" correctly yields the literal "&amp;".
+  text = _decodeNumericEntities(text);
 
   text = text
       .replaceAll(_spacesTabsRe, ' ')
@@ -603,4 +686,23 @@ String stripHTML(String html) {
       .replaceAll(_multiNewlineRe, '\n\n');
 
   return text.trim();
+}
+
+/// Invalid references (overflow, surrogates, > U+10FFFF) are left as-is —
+/// matching the Swift importer exactly, so segment text stays byte-identical
+/// across platforms.
+String _decodeNumericEntities(String text) {
+  if (!text.contains('&#')) return text;
+  return text.replaceAllMapped(_numericEntityRe, (m) {
+    final body = m.group(1)!;
+    final isHex = body.startsWith('x') || body.startsWith('X');
+    final code =
+        int.tryParse(isHex ? body.substring(1) : body, radix: isHex ? 16 : 10);
+    if (code == null ||
+        code > 0x10FFFF ||
+        (code >= 0xD800 && code <= 0xDFFF)) {
+      return m.group(0)!;
+    }
+    return String.fromCharCode(code);
+  });
 }

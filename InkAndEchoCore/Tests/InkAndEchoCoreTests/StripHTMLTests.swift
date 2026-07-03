@@ -20,4 +20,18 @@ struct StripHTMLTests {
         let out = stripHTML("<body><p>One &amp; two.</p><p>Three.</p></body>")
         #expect(out == "One & two.\n\nThree.")
     }
+
+    /// Numeric entities decode to their characters — they used to be
+    /// stripped, so "don&#8217;t" became "dont" and every contraction fell
+    /// out of the aligner's anchor matching.
+    @Test func decodesNumericEntities() {
+        #expect(stripHTML("<p>don&#8217;t</p>") == "don\u{2019}t")
+        #expect(stripHTML("<p>don&#x2019;t</p>") == "don\u{2019}t")
+        #expect(stripHTML("<p>A&#8212;B</p>") == "A\u{2014}B")
+        // After the named table, so a double-escaped entity stays literal.
+        #expect(stripHTML("<p>&#38;amp;</p>") == "&amp;")
+        // Invalid references stay as-is instead of corrupting the text.
+        #expect(stripHTML("<p>bad &#xD800; ref</p>") == "bad &#xD800; ref")
+        #expect(stripHTML("<p>huge &#99999999999; ref</p>") == "huge &#99999999999; ref")
+    }
 }

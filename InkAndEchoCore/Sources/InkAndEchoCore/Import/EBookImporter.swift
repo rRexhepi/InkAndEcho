@@ -13,13 +13,17 @@ public struct ImportedBook: Sendable {
     public let coverImageData: Data?
     public let segments: [TextSegment]
     public let totalPages: Int
+    /// Non-fatal import problems (unreadable spine entries, dangling spine
+    /// refs). The import succeeded; these explain any missing chapters.
+    public let warnings: [String]
 
-    public init(title: String, author: String, coverImageData: Data?, segments: [TextSegment], totalPages: Int) {
+    public init(title: String, author: String, coverImageData: Data?, segments: [TextSegment], totalPages: Int, warnings: [String] = []) {
         self.title = title
         self.author = author
         self.coverImageData = coverImageData
         self.segments = segments
         self.totalPages = totalPages
+        self.warnings = warnings
     }
 }
 
@@ -61,10 +65,17 @@ public struct EPUBImporter: EBookImporter {
         }
 
         var segments: [TextSegment] = []
+        var warnings: [String] = []
         for itemref in opf.spine {
-            guard let item = opf.manifest[itemref] else { continue }
+            guard let item = opf.manifest[itemref] else {
+                warnings.append("Spine item '\(itemref)' has no manifest entry")
+                continue
+            }
             let path = resolvePath(item.href, relativeTo: opfDir)
-            let xhtml = (try? extractText(from: archive, path: path)) ?? ""
+            guard let xhtml = try? extractText(from: archive, path: path) else {
+                warnings.append("Unreadable spine entry: \(path)")
+                continue
+            }
             appendSpineSegments(
                 into: &segments,
                 itemref: itemref,
@@ -72,6 +83,12 @@ public struct EPUBImporter: EBookImporter {
                 xhtml: xhtml,
                 tocEntries: tocEntries
             )
+        }
+        guard !segments.isEmpty else {
+            let detail = warnings.isEmpty
+                ? "No readable text in any spine entry."
+                : "No readable text. " + warnings.joined(separator: ". ")
+            throw ImporterError.malformedEPUB(detail)
         }
 
         let cover: Data? = {
@@ -86,7 +103,8 @@ public struct EPUBImporter: EBookImporter {
             author: opf.author,
             coverImageData: cover,
             segments: segments,
-            totalPages: 0
+            totalPages: 0,
+            warnings: warnings
         )
     }
 }
@@ -102,7 +120,7 @@ private func extractText(from archive: Archive, path: String) throws -> String {
 }
 
 private func extractData(from archive: Archive, path: String) throws -> Data {
-    guard let entry = archive[path] else {
+    guard let entry = findEntry(in: archive, path: path) else {
         throw ImporterError.malformedEPUB("Missing entry: \(path)")
     }
     // Cap the inflated size. A zip bomb (kilobytes compressed, gigabytes
@@ -123,8 +141,38 @@ private func extractData(from archive: Archive, path: String) throws -> Data {
     return data
 }
 
+/// Raw path first, then a rescan comparing canonical forms — zip entries
+/// whose names stayed percent-encoded (or carry `./` prefixes) still resolve
+/// against the already-normalized hrefs.
+private func findEntry(in archive: Archive, path: String) -> Entry? {
+    if let entry = archive[path] { return entry }
+    let want = normalizeHref(path)
+    return archive.first { normalizeHref($0.path) == want }
+}
+
 private func resolvePath(_ relative: String, relativeTo base: String) -> String {
-    base.isEmpty ? relative : "\(base)/\(relative)"
+    collapsePathSegments(base.isEmpty ? relative : "\(base)/\(relative)")
+}
+
+/// Canonical form of an intra-EPUB href: percent-escapes decoded (kept raw
+/// when decoding fails, so the odd literal `%` survives) and `.` / `..`
+/// segments collapsed. Applied at parse time so both the archive lookup and
+/// TOC↔spine href equality see one spelling.
+func normalizeHref(_ raw: String) -> String {
+    collapsePathSegments(raw.removingPercentEncoding ?? raw)
+}
+
+func collapsePathSegments(_ path: String) -> String {
+    var out: [Substring] = []
+    for segment in path.split(separator: "/", omittingEmptySubsequences: true) {
+        if segment == "." { continue }
+        if segment == "..", let last = out.last, last != ".." {
+            out.removeLast()
+        } else {
+            out.append(segment)
+        }
+    }
+    return out.joined(separator: "/")
 }
 
 // MARK: - container.xml
@@ -208,7 +256,7 @@ private final class OPFDelegate: NSObject, XMLParserDelegate {
             let properties = attrs["properties"] ?? ""
             manifest[id] = ManifestItem(
                 id: id,
-                href: href,
+                href: normalizeHref(href),
                 mediaType: attrs["media-type"] ?? "",
                 properties: properties
             )
@@ -300,12 +348,15 @@ private struct TOCEntry {
     let title: String
 }
 
+/// Href part comes back canonical (`normalizeHref`) so TOC entries compare
+/// equal to already-normalized manifest hrefs; the fragment stays raw — it
+/// keys `findAnchorOffset`'s `id="…"` match and downstream segment ids.
 private func splitHref(_ raw: String) -> (href: String, fragment: String?) {
-    guard let hashIdx = raw.firstIndex(of: "#") else { return (raw, nil) }
+    guard let hashIdx = raw.firstIndex(of: "#") else { return (normalizeHref(raw), nil) }
     let href = String(raw[..<hashIdx])
     let after = raw.index(after: hashIdx)
     let fragment = after < raw.endIndex ? String(raw[after...]) : nil
-    return (href, fragment)
+    return (normalizeHref(href), fragment)
 }
 
 /// EPUB 3 `<nav epub:type="toc">` — every anchor becomes a TOC entry in
@@ -670,12 +721,11 @@ func stripHTML(_ html: String) -> String {
     for (entity, replacement) in entities {
         text = text.replacingOccurrences(of: entity, with: replacement)
     }
-    // Numeric entities like &#x...; or &#N;
-    text = text.replacingOccurrences(
-        of: "&#(\\d+);",
-        with: "",
-        options: .regularExpression
-    )
+    // Numeric entities (&#N; and &#xN;) — decoded, not stripped. Stripping
+    // turned "don&#8217;t" into "dont", which also dropped every contraction
+    // out of the aligner's anchor matching. Runs after the named table so
+    // "&#38;amp;" correctly yields the literal "&amp;".
+    text = decodeNumericEntities(text)
 
     // Collapse runs of whitespace inside lines but preserve paragraph breaks.
     text = text.replacingOccurrences(of: "[ \\t]+", with: " ", options: .regularExpression)
@@ -683,6 +733,34 @@ func stripHTML(_ html: String) -> String {
     text = text.replacingOccurrences(of: "\\n{3,}", with: "\n\n", options: .regularExpression)
 
     return text.trimmingCharacters(in: .whitespacesAndNewlines)
+}
+
+private let numericEntityRegex = try? NSRegularExpression(pattern: "&#([xX][0-9a-fA-F]+|[0-9]+);")
+
+/// Invalid references (overflow, surrogates, > U+10FFFF) are left as-is —
+/// matching the Dart port exactly, so segment text stays byte-identical
+/// across platforms.
+func decodeNumericEntities(_ text: String) -> String {
+    guard text.contains("&#"), let re = numericEntityRegex else { return text }
+    let nsText = text as NSString
+    var out = ""
+    out.reserveCapacity(text.count)
+    var cursor = 0
+    re.enumerateMatches(in: text, range: NSRange(location: 0, length: nsText.length)) { match, _, _ in
+        guard let match else { return }
+        out += nsText.substring(with: NSRange(location: cursor, length: match.range.location - cursor))
+        let body = nsText.substring(with: match.range(at: 1))
+        let isHex = body.hasPrefix("x") || body.hasPrefix("X")
+        let code = isHex ? UInt32(body.dropFirst(), radix: 16) : UInt32(body)
+        if let code, let scalar = Unicode.Scalar(code) {
+            out.append(Character(scalar))
+        } else {
+            out += nsText.substring(with: match.range)
+        }
+        cursor = match.range.location + match.range.length
+    }
+    out += nsText.substring(from: cursor)
+    return out
 }
 
 public enum ImporterError: LocalizedError, Sendable {
