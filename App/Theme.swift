@@ -39,6 +39,10 @@ enum Theme {
 
     static let highlightWordSoft = adaptive(light: (250, 221, 138), dark: (120, 100,  62))
 
+    /// DESIGN.md `highlight-sentence` (#C7973F) — the quiet amber underline
+    /// on the sentence being narrated.
+    static let highlightSentence = adaptive(light: (199, 151,  63), dark: (199, 151,  63))
+
     /// DESIGN.md `semantic-warning` (#C7973F) — same hue as annot-amber.
     static let warning        = adaptive(light: (199, 151,  63), dark: (199, 151,  63))
 }

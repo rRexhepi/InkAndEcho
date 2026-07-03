@@ -17,6 +17,26 @@ enum ThemeChoice: String, CaseIterable, Identifiable {
     }
 }
 
+/// Read-along granularity while an aligned audiobook narrates. Raw value
+/// persists under `AppSettings.readAlongModeKey`; readers of the key default
+/// through `AppSettings.initialReadAlongModeRaw()`, which migrates the old
+/// build-14 bool (true → `.word`) without a write.
+enum ReadAlongMode: String, CaseIterable, Identifiable {
+    case off
+    case word
+    case sentence
+
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .off:      return "Off"
+        case .word:     return "Word"
+        case .sentence: return "Sentence"
+        }
+    }
+}
+
 /// Persisted user preferences, backed by `@AppStorage`. Read these via
 /// the property wrappers in any view; writes go straight to `UserDefaults`
 /// and propagate through SwiftUI automatically.
@@ -25,8 +45,20 @@ enum AppSettings {
     static let animationsEnabledKey = "inkandecho.animationsEnabled"
     /// Color applied when the user taps / drags to highlight a word.
     static let defaultHighlightColorKey = "inkandecho.defaultHighlightColor"
-    /// Tint each word as the audiobook narrates it (read-along).
+    /// Legacy read-along bool (build ≤ 14) — superseded by `readAlongModeKey`,
+    /// kept only as the migration source in `initialReadAlongModeRaw()`.
     static let wordHighlightingKey = "inkandecho.wordHighlighting"
+    /// Read-along mode: `ReadAlongMode` raw value (off / word / sentence).
+    static let readAlongModeKey = "inkandecho.readAlongMode"
+
+    /// Default for every `readAlongModeKey` @AppStorage declaration: an
+    /// unset key falls back to the old bool (true → word), so upgrading
+    /// users keep their setting with no write-migration.
+    static func initialReadAlongModeRaw() -> String {
+        UserDefaults.standard.bool(forKey: wordHighlightingKey)
+            ? ReadAlongMode.word.rawValue
+            : ReadAlongMode.off.rawValue
+    }
     /// Keep the current audiobook playing when you open a different book,
     /// instead of switching the shared engine to the new one.
     static let backgroundAudioKey = "inkandecho.backgroundAudio"
@@ -49,13 +81,20 @@ struct SettingsView: View {
     @AppStorage(AppSettings.themeKey) private var themeRaw: String = ThemeChoice.system.rawValue
     @AppStorage(AppSettings.animationsEnabledKey) private var animationsEnabled: Bool = true
     @AppStorage(AppSettings.defaultHighlightColorKey) private var defaultHighlightColorRaw: String = AnnotationColor.amber.rawValue
-    @AppStorage(AppSettings.wordHighlightingKey) private var wordHighlightingEnabled: Bool = false
+    @AppStorage(AppSettings.readAlongModeKey) private var readAlongModeRaw: String = AppSettings.initialReadAlongModeRaw()
     @AppStorage(AppSettings.backgroundAudioKey) private var backgroundAudioEnabled: Bool = false
 
     private var theme: Binding<ThemeChoice> {
         Binding(
             get: { ThemeChoice(rawValue: themeRaw) ?? .system },
             set: { themeRaw = $0.rawValue }
+        )
+    }
+
+    private var readAlongMode: Binding<ReadAlongMode> {
+        Binding(
+            get: { ReadAlongMode(rawValue: readAlongModeRaw) ?? .off },
+            set: { readAlongModeRaw = $0.rawValue }
         )
     }
 
@@ -92,8 +131,13 @@ struct SettingsView: View {
             }
 
             Section("Read-along") {
-                Toggle("Highlight the spoken word", isOn: $wordHighlightingEnabled)
-                Text("Tints each word as the audiobook narrates it. Needs an aligned audiobook.")
+                Picker("Follow the narration", selection: readAlongMode) {
+                    ForEach(ReadAlongMode.allCases) { mode in
+                        Text(mode.label).tag(mode)
+                    }
+                }
+                .pickerStyle(.segmented)
+                Text("Word tints each spoken word; Sentence underlines the sentence being read. Needs an aligned audiobook.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }

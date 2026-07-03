@@ -73,7 +73,10 @@ struct ReaderView: View {
     @State var annotationRevision: Int = 0
 
     @AppStorage("inkandecho.paginated") var paginated: Bool = true
-    @AppStorage(AppSettings.wordHighlightingKey) var wordHighlightingEnabled: Bool = false
+    @AppStorage(AppSettings.readAlongModeKey) var readAlongModeRaw: String = AppSettings.initialReadAlongModeRaw()
+    /// Three-way read-along mode (off / word / sentence). Replaces the old
+    /// wordHighlighting bool; `initialReadAlongModeRaw` migrates it.
+    var readAlongMode: ReadAlongMode { ReadAlongMode(rawValue: readAlongModeRaw) ?? .off }
     /// When on, opening a different audiobook leaves the current one playing
     /// in the background instead of switching. See `AudioCoordinator`.
     @AppStorage(AppSettings.backgroundAudioKey) var backgroundAudioEnabled: Bool = false
@@ -1160,9 +1163,7 @@ struct ReaderView: View {
             seekEnabled: alignmentMap != nil,
             segmentID: segmentID,
             activeWordTracker: activeWordTracker,
-            // Rough chapters (matched fraction under the threshold) render
-            // no word highlight — the times there are mostly interpolation.
-            highlightMode: wordHighlightingEnabled && !roughSegments.contains(segmentID) ? .word : .none,
+            highlightMode: rowHighlightMode(for: segmentID),
             annotations: annotations(forSegment: segmentID, paragraph: paragraphIndex),
             onPlayFromWord: { localWordIdx in
                 seekToWord(segmentID: segmentID, wordOffset: wordOffset, localIndex: localWordIdx)
@@ -1213,6 +1214,20 @@ struct ReaderView: View {
                 annotationRevision &+= 1
             }
         )
+    }
+
+    /// Per-row read-along mode: the user's setting, degraded per chapter.
+    /// Rough chapters (matched fraction under the threshold) never claim
+    /// word precision — their times are mostly interpolation — but the
+    /// sentence underline is coarse enough to stay honest, so word mode
+    /// falls back to it there (the fallback the mismatch work deferred to
+    /// sentence mode).
+    func rowHighlightMode(for segmentID: String) -> HighlightMode {
+        switch readAlongMode {
+        case .off:      return .none
+        case .sentence: return .sentence
+        case .word:     return roughSegments.contains(segmentID) ? .sentence : .word
+        }
     }
 
     func seekToWord(segmentID: String, wordOffset: Int, localIndex: Int) {
@@ -1425,7 +1440,7 @@ struct ReaderView: View {
         // mode it may be playing a different one, whose timeline says nothing
         // about this book's pages.
         guard audioIsThisBook else { return }
-        guard wordHighlightingEnabled, engine.state == .playing else { return }
+        guard readAlongMode != .off, engine.state == .playing else { return }
         guard !isRestoringProgress else { return }
         if let until = followState.suspendedUntil, Date() < until { return }
         guard let aw = activeWordTracker.current,
@@ -1784,52 +1799,6 @@ struct ReaderView: View {
     var currentSegment: TextSegment? {
         guard let id = selectedSegmentID ?? segments.first?.id else { return nil }
         return segments.first(where: { $0.id == id })
-    }
-
-    func sentenceWordRanges(in text: String) -> [(start: Int, end: Int)] {
-        var sentenceCharRanges: [(Int, Int)] = []
-        text.enumerateSubstrings(
-            in: text.startIndex..<text.endIndex,
-            options: .bySentences
-        ) { _, range, _, _ in
-            let start = text.distance(from: text.startIndex, to: range.lowerBound)
-            let end = text.distance(from: text.startIndex, to: range.upperBound)
-            sentenceCharRanges.append((start, end))
-        }
-
-        var wordCharSpans: [(Int, Int)] = []
-        var inWord = false
-        var wordStart = 0
-        var idx = 0
-        for ch in text {
-            if ch.isWhitespace || ch.isNewline {
-                if inWord {
-                    wordCharSpans.append((wordStart, idx))
-                    inWord = false
-                }
-            } else {
-                if !inWord { wordStart = idx; inWord = true }
-            }
-            idx += 1
-        }
-        if inWord { wordCharSpans.append((wordStart, idx)) }
-
-        var ranges: [(start: Int, end: Int)] = []
-        for (sStart, sEnd) in sentenceCharRanges {
-            var first: Int?
-            var last: Int?
-            for (i, span) in wordCharSpans.enumerated() {
-                let center = (span.0 + span.1) / 2
-                if center >= sStart && center < sEnd {
-                    if first == nil { first = i }
-                    last = i
-                }
-            }
-            if let f = first, let l = last {
-                ranges.append((f, l + 1))
-            }
-        }
-        return ranges
     }
 
     // MARK: - Loading
@@ -2351,6 +2320,58 @@ struct AlignmentIndexes: Sendable {
 /// all count words with this exact split so their indices line up.
 func tokenizeWords(_ text: String) -> [String] {
     text.components(separatedBy: .whitespacesAndNewlines).filter { !$0.isEmpty }
+}
+
+/// Sentence boundaries of `text` in word-index space (`end` exclusive),
+/// word-counted exactly like `tokenizeWords`. Shared by paragraph chunking,
+/// `ParagraphRow`'s sentence underline, and the sentence seek/replay path —
+/// all sentence consumers derive from this, never from `SentenceAnchor`
+/// (anchored-sentences-only with raw seconds reproduced the documented
+/// "flips too soon" failure).
+func sentenceWordRanges(in text: String) -> [(start: Int, end: Int)] {
+    var sentenceCharRanges: [(Int, Int)] = []
+    text.enumerateSubstrings(
+        in: text.startIndex..<text.endIndex,
+        options: .bySentences
+    ) { _, range, _, _ in
+        let start = text.distance(from: text.startIndex, to: range.lowerBound)
+        let end = text.distance(from: text.startIndex, to: range.upperBound)
+        sentenceCharRanges.append((start, end))
+    }
+
+    var wordCharSpans: [(Int, Int)] = []
+    var inWord = false
+    var wordStart = 0
+    var idx = 0
+    for ch in text {
+        if ch.isWhitespace || ch.isNewline {
+            if inWord {
+                wordCharSpans.append((wordStart, idx))
+                inWord = false
+            }
+        } else {
+            if !inWord { wordStart = idx; inWord = true }
+        }
+        idx += 1
+    }
+    if inWord { wordCharSpans.append((wordStart, idx)) }
+
+    var ranges: [(start: Int, end: Int)] = []
+    for (sStart, sEnd) in sentenceCharRanges {
+        var first: Int?
+        var last: Int?
+        for (i, span) in wordCharSpans.enumerated() {
+            let center = (span.0 + span.1) / 2
+            if center >= sStart && center < sEnd {
+                if first == nil { first = i }
+                last = i
+            }
+        }
+        if let f = first, let l = last {
+            ranges.append((f, l + 1))
+        }
+    }
+    return ranges
 }
 
 /// Narration-follow bookkeeping. Plain class (never invalidates SwiftUI):

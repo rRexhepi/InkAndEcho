@@ -5,11 +5,14 @@ import UIKit
 #endif
 
 /// Active-word highlighting mode for `ParagraphRow`. `.word` tints the word
-/// currently being narrated, at any playback rate; `.none` disables
+/// currently being narrated, at any playback rate; `.sentence` underlines
+/// the sentence containing it (calmer, and the honest fallback for rough
+/// chapters, whose word times are mostly interpolation); `.none` disables
 /// read-along highlighting (and skips the tracker read entirely, so rows
 /// don't invalidate on word changes).
 enum HighlightMode {
     case word
+    case sentence
     case none
 }
 
@@ -110,11 +113,12 @@ struct ParagraphRow: View {
     }
 
     private var paragraphText: some View {
-        let (attrString, ranges, backgrounds) = buildAttributedString()
+        let (attrString, ranges, backgrounds, underline) = buildAttributedString()
         return HighlightableTextView(
             attributedString: attrString,
             wordRanges: ranges,
             wordBackgrounds: backgrounds,
+            sentenceUnderline: underline,
             paintPreviewColor: UIColor(colorView(for: AppSettings.defaultHighlightColor())).withAlphaComponent(0.30),
             onToggleWord: onToggleWord,
             onPaintWord: onPaintWord,
@@ -133,9 +137,9 @@ struct ParagraphRow: View {
         // row's ⋯ button, which shows the identical `contextMenuContent`.
     }
 
-    private func buildAttributedString() -> (AttributedString, [(localIndex: Int, range: NSRange)], [(range: NSRange, color: UIColor)]) {
+    private func buildAttributedString() -> (AttributedString, [(localIndex: Int, range: NSRange)], [(range: NSRange, color: UIColor)], NSRange?) {
         // Active read-along word for this paragraph, computed once.
-        let activeIdx: Int? = highlightMode == .word ? activeLocalWordIndex : nil
+        let activeIdx: Int? = highlightMode == .none ? nil : activeLocalWordIndex
         var result = AttributedString()
         var inWord = false
         var wordStart = text.startIndex
@@ -175,7 +179,7 @@ struct ParagraphRow: View {
         // `NSAttributedString(_:)`, so paint + read-along both go out-of-band.
         // Read-along (active word) wins over a manual paint color.
         let backgrounds: [(range: NSRange, color: UIColor)] = nsRanges.compactMap { entry in
-            if entry.localIndex == activeIdx {
+            if highlightMode == .word, entry.localIndex == activeIdx {
                 return (entry.range, UIColor(Theme.highlightWordSoft))
             }
             if let wc = wordHighlights[entry.localIndex] {
@@ -183,7 +187,20 @@ struct ParagraphRow: View {
             }
             return nil
         }
-        return (result, nsRanges, backgrounds)
+        // Sentence mode: one continuous underline from the first to the last
+        // word of the sentence containing the active word (spanning the gaps
+        // so it reads as a single stroke). Only the active row pays for the
+        // sentence scan. The row shows a chunk of a split paragraph at most,
+        // so chunk-local ranges are exactly the rendered text's.
+        var underline: NSRange?
+        if highlightMode == .sentence, let active = activeIdx,
+           let sentence = sentenceWordRanges(in: text)
+               .first(where: { active >= $0.start && active < $0.end }),
+           sentence.start < nsRanges.count {
+            let last = min(sentence.end, nsRanges.count) - 1
+            underline = NSUnionRange(nsRanges[sentence.start].range, nsRanges[last].range)
+        }
+        return (result, nsRanges, backgrounds, underline)
     }
 
     private func appendWord(_ word: String, localIndex: Int, into result: inout AttributedString, ranges: inout [(local: Int, range: Range<AttributedString.Index>)]) {

@@ -10,6 +10,9 @@ struct HighlightableTextView: UIViewRepresentable {
     let attributedString: AttributedString
     let wordRanges: [(localIndex: Int, range: NSRange)]
     let wordBackgrounds: [(range: NSRange, color: UIColor)]
+    /// Read-along sentence mode: the range to underline (DESIGN.md
+    /// `highlight-sentence` amber), nil for none.
+    let sentenceUnderline: NSRange?
     /// Tint shown live under the finger while drag-painting, before the
     /// annotations commit at gesture end.
     let paintPreviewColor: UIColor
@@ -47,7 +50,7 @@ struct HighlightableTextView: UIViewRepresentable {
         v.onPaintWord = onPaintWord
         v.onPaintEnded = onPaintEnded
         v.paintPreviewColor = paintPreviewColor
-        v.applyAttributedString(attributedString, backgrounds: wordBackgrounds)
+        v.applyAttributedString(attributedString, backgrounds: wordBackgrounds, underline: sentenceUnderline)
     }
 
     /// `textView(_:editMenuForTextIn:suggestedActions:)` is the documented
@@ -114,7 +117,7 @@ struct HighlightableTextView: UIViewRepresentable {
             return CGSize(width: UIView.noIntrinsicMetric, height: ceil(size.height))
         }
 
-        func applyAttributedString(_ s: AttributedString, backgrounds: [(range: NSRange, color: UIColor)] = []) {
+        func applyAttributedString(_ s: AttributedString, backgrounds: [(range: NSRange, color: UIColor)] = [], underline: NSRange? = nil) {
             let ns = NSMutableAttributedString(attributedString: NSAttributedString(s))
             let full = NSRange(location: 0, length: ns.length)
             let para = NSMutableParagraphStyle()
@@ -137,6 +140,17 @@ struct HighlightableTextView: UIViewRepresentable {
                 let r = NSIntersectionRange(bg.range, full)
                 if r.length > 0 {
                     ns.addAttribute(.backgroundColor, value: bg.color, range: r)
+                }
+            }
+            // Sentence-mode underline goes into the candidate string too, so
+            // the equality short-circuit below still works: word ticks within
+            // the same sentence build an identical string and skip the
+            // relayout — sentence mode reassigns once per sentence.
+            if let underline {
+                let r = NSIntersectionRange(underline, full)
+                if r.length > 0 {
+                    ns.addAttribute(.underlineStyle, value: NSUnderlineStyle.single.rawValue, range: r)
+                    ns.addAttribute(.underlineColor, value: UIColor(Theme.highlightSentence), range: r)
                 }
             }
             if attributedText?.isEqual(to: ns) != true {
