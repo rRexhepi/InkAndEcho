@@ -46,8 +46,15 @@ final class AlignmentCoordinator {
         // re-aligning the same book in one session would otherwise write the
         // same value over itself and never fire the reader's reload.
         lastFinishedBookID = nil
+        // A cancelled predecessor unwinds cooperatively — its WhisperKit
+        // instance (and JIT CoreML kernels) can still be alive when the
+        // user starts the next job. Await it HERE, inside the new task,
+        // so two pipelines never run concurrently. Never await inside
+        // `cancel()` — that would block the main actor.
+        let predecessor = task
         task = Task { @MainActor [weak self] in
-            guard let self else { return }
+            await predecessor?.value
+            guard let self, self.generation == myGeneration else { return }
             let service = AlignmentService(modelContext: modelContext)
             do {
                 try await service.runAlignment(for: book) { [weak self] s in
@@ -79,7 +86,8 @@ final class AlignmentCoordinator {
 
     func cancel() {
         task?.cancel()
-        task = nil
+        // Keep the task reference: the next start() awaits it so the
+        // cancelled job fully unwinds before a new pipeline spins up.
         // Bump the generation so the cancelled task's epilogue becomes a
         // no-op, then clear state here (the epilogue won't).
         generation += 1

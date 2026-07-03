@@ -50,6 +50,18 @@ public struct WhisperAligner: AudioTextAligner {
             return Double(file.length) / file.processingFormat.sampleRate
         }()
 
+        // Transcript cache, checked BEFORE the WhisperKit init: a hit skips
+        // the model load (and its one-time ~150 MB download) entirely, so a
+        // re-align costs seconds.
+        let cache = TranscriptCache()
+        let cacheKey = cache.key(forAudioAt: audioURL, model: modelIdentifier)
+        if let cacheKey, let cached = cache.load(key: cacheKey) {
+            progress(.aligning)
+            let map = alignWords(audio: cached, segments: input.segments)
+            progress(.complete(wordsAligned: map.words.count, sentencesAligned: map.sentences.count))
+            return map
+        }
+
         progress(.loadingModel(model: modelIdentifier))
         let pipe: WhisperKit
         do {
@@ -83,6 +95,10 @@ public struct WhisperAligner: AudioTextAligner {
         // chunk, and since the cursor never advances on an empty slice,
         // sub-5-minute audiobooks spun the aligner forever.
         while totalAudioSeconds <= 0 || loadCursor < totalAudioSeconds {
+            // Cooperative cancellation between chunks — without this, a
+            // cancelled job only stops once WhisperKit's own internals
+            // happen to check, which can be a full chunk (~19 s) later.
+            try Task.checkCancellation()
             let chunkStart = loadCursor
             let chunkEnd = totalAudioSeconds > 0
                 ? min(chunkStart + loadChunkSeconds, totalAudioSeconds)
@@ -175,6 +191,10 @@ public struct WhisperAligner: AudioTextAligner {
         // start after chunk i+1's first words); downstream walks assume
         // time order, so settle it once here.
         audioWords.sort { ($0.startSeconds, $0.endSeconds) < ($1.startSeconds, $1.endSeconds) }
+
+        if let cacheKey {
+            cache.store(audioWords, key: cacheKey)
+        }
 
         progress(.aligning)
 
@@ -557,7 +577,7 @@ private func formatETA(_ seconds: TimeInterval) -> String {
 
 // MARK: - Helpers
 
-struct AudioWord: Sendable {
+struct AudioWord: Sendable, Codable {
     let text: String
     let startSeconds: Double
     let endSeconds: Double
